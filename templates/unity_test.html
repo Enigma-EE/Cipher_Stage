@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Unity/观众端 命令测试</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 16px; }
+    .row { display: flex; gap: 12px; align-items: center; margin-bottom: 8px; }
+    input[type="text"], input[type="number"] { padding: 6px; }
+    .card { border: 1px solid #ddd; border-radius: 8px; padding: 12px; margin-bottom: 16px; }
+    .log { height: 200px; overflow: auto; border: 1px solid #ddd; padding: 8px; background: #fafafa; }
+    .btn { padding: 6px 10px; border: 1px solid #888; border-radius: 6px; cursor: pointer; background: #fff; }
+    .btn.primary { background: #1976d2; color: #fff; border-color: #1976d2; }
+    label { width: 120px; }
+  </style>
+</head>
+<body>
+  <h2>Unity/观众端命令测试页</h2>
+    <p>此页通过后端 <code>/api/unity/send</code> 将指令广播到监控服务 <code>ws://localhost:{{ monitor_port }}/sync/&lt;角色名&gt;</code>，观众端（如 Unity）应连接 <code>ws://localhost:{{ monitor_port }}/ws/&lt;角色名&gt;</code> 接收。</p>
+
+  <div class="card">
+    <div class="row">
+      <label>角色名称</label>
+    <input id="ee" type="text" value="{{ ee_name }}" />
+      <button class="btn" id="connect">连接监控WS</button>
+    </div>
+    <div class="row">
+      <label>WS状态</label>
+      <span id="wsStatus">未连接</span>
+    </div>
+    <div class="row">
+      <label>收到广播</label>
+    </div>
+    <div id="log" class="log"></div>
+  </div>
+
+  <div class="card">
+    <h3>动画播放</h3>
+    <div class="row">
+      <label>状态名</label>
+      <input id="animState" type="text" value="Having A Meeting, Female" />
+    </div>
+    <div class="row">
+      <label>层</label>
+      <input id="animLayer" type="number" value="0" />
+      <label>淡入</label>
+      <input id="animFade" type="number" step="0.05" value="0.25" />
+      <label>速度</label>
+      <input id="animSpeed" type="number" step="0.1" value="1.0" />
+      <button class="btn primary" id="sendAnim">发送动画</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>表情与口型</h3>
+    <div class="row">
+      <label>表情名</label>
+      <input id="exprName" type="text" value="happy" />
+      <label>权重</label>
+      <input id="exprWeight" type="number" step="0.1" value="0.8" />
+      <button class="btn" id="sendExpr">发送表情</button>
+    </div>
+    <div class="row">
+      <label>AA</label>
+      <input id="aa" type="number" step="0.05" value="0.6" />
+      <label>EE</label>
+      <input id="ee" type="number" step="0.05" value="0.2" />
+      <label>IH</label>
+      <input id="ih" type="number" step="0.05" value="0.0" />
+      <label>OH</label>
+      <input id="oh" type="number" step="0.05" value="0.1" />
+      <label>OU</label>
+      <input id="ou" type="number" step="0.05" value="0.0" />
+      <button class="btn" id="sendMouth">发送口型</button>
+    </div>
+  </div>
+
+  <script>
+    const monitorPort = { monitor_port };
+    const logEl = document.getElementById('log');
+    const wsStatusEl = document.getElementById('wsStatus');
+    let ws;
+
+    function log(msg) {
+      const line = document.createElement('div');
+      line.textContent = typeof msg === 'string' ? msg : JSON.stringify(msg);
+      logEl.appendChild(line);
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    document.getElementById('connect').onclick = () => {
+    const name = document.getElementById('ee').value.trim() || '{{ ee_name }}';
+      if (ws) { try { ws.close(); } catch(e){} }
+      ws = new WebSocket(`ws://localhost:${monitorPort}/ws/${encodeURIComponent(name)}`);
+      ws.onopen = () => { wsStatusEl.textContent = '已连接'; log('WS 连接成功'); };
+      ws.onclose = () => { wsStatusEl.textContent = '已断开'; log('WS 已断开'); };
+      ws.onerror = (e) => { log('WS 错误: ' + e.message); };
+      ws.onmessage = (ev) => { try { log(JSON.parse(ev.data)); } catch { log(ev.data); } };
+    };
+
+    async function sendCommands(cmds) {
+    const ee = document.getElementById('ee').value.trim() || '{{ ee_name }}';
+      const resp = await fetch('/api/unity/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ee_name: ee, lanlan_name: ee, commands: cmds })
+      });
+      const data = await resp.json();
+      log({ api: '/api/unity/send', result: data });
+    }
+
+    document.getElementById('sendAnim').onclick = () => {
+      const state = document.getElementById('animState').value;
+      const layer = parseInt(document.getElementById('animLayer').value || '0', 10);
+      const fade = parseFloat(document.getElementById('animFade').value || '0.25');
+      const speed = parseFloat(document.getElementById('animSpeed').value || '1');
+      sendCommands([{ type: 'anim.play', state, layer, fade, speed }]);
+    };
+
+    document.getElementById('sendExpr').onclick = () => {
+      const name = document.getElementById('exprName').value;
+      const weight = parseFloat(document.getElementById('exprWeight').value || '0.8');
+      sendCommands([{ type: 'face.expression', name, weight }]);
+    };
+
+    document.getElementById('sendMouth').onclick = () => {
+      const aa = parseFloat(document.getElementById('aa').value || '0');
+      const ee = parseFloat(document.getElementById('ee').value || '0');
+      const ih = parseFloat(document.getElementById('ih').value || '0');
+      const oh = parseFloat(document.getElementById('oh').value || '0');
+      const ou = parseFloat(document.getElementById('ou').value || '0');
+      sendCommands([{ type: 'face.mouth', aa, ee, ih, oh, ou }]);
+    };
+  </script>
+</body>
+</html>

@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>调试页面</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .debug-info { background: #f0f0f0; padding: 10px; margin: 10px 0; border-radius: 5px; }
+        .container { position: relative; width: 100%; height: 600px; }
+        #live2d-container, #vrm-container { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+        #live2d-canvas, #vrm-canvas { width: 100%; height: 100%; }
+        .control-panel { position: fixed; top: 10px; right: 10px; background: rgba(0,0,0,0.8); color: white; padding: 10px; border-radius: 5px; }
+        .chat-container { position: fixed; bottom: 10px; left: 10px; width: 300px; height: 200px; background: rgba(255,255,255,0.9); border-radius: 5px; }
+        .buttons { margin: 10px 0; }
+        button { margin: 5px; padding: 5px 10px; }
+    </style>
+</head>
+<body>
+    <h1>调试页面</h1>
+    <div class="debug-info">
+        <h3>检查控制台输出以查看详细信息</h3>
+    </div>
+    
+    <!-- 必要的DOM元素 -->
+    <div class="container">
+        <div id="live2d-container">
+            <canvas id="live2d-canvas"></canvas>
+        </div>
+        <div id="vrm-container">
+            <canvas id="vrm-canvas"></canvas>
+        </div>
+    </div>
+    
+    <!-- 控制面板 -->
+    <div id="live2d-control-panel" class="control-panel" style="display: none;">
+        <h4>Live2D 控制</h4>
+    </div>
+    <div id="vrm-control-panel" class="control-panel" style="display: none;">
+        <h4>VRM 控制</h4>
+    </div>
+    
+    <!-- 聊天容器 -->
+    <div id="chat-container" class="chat-container">
+        <div id="chat-content-wrapper">
+            <div id="chat-content"></div>
+        </div>
+        <button id="toggle-chat-btn">切换聊天</button>
+    </div>
+    
+    <!-- 侧边栏 -->
+    <div id="sidebar">
+        <div id="sidebarbox">
+            <button id="toggle-sidebar-btn">-</button>
+            <div>侧边栏内容</div>
+        </div>
+    </div>
+    
+    <!-- 控制按钮 -->
+    <div class="buttons">
+        <button id="micButton">麦克风</button>
+        <button id="muteButton">静音</button>
+        <button id="screenButton">屏幕共享</button>
+        <button id="stopButton">停止</button>
+        <button id="resetSessionButton">重置会话</button>
+    </div>
+    
+    <div id="status">状态：准备就绪</div>
+    
+    <script>
+        // 定义配置对象（EE 命名，保留兼容别名）
+        window.ee_config = {
+            ee_name: 'EE',
+            model_type: 'live2d',
+            live2d_model: 'mao_pro'
+        };
+        // 兼容旧命名
+        window.lanlan_config = window.lanlan_config || { lanlan_name: window.ee_config.ee_name };
+        
+        console.log('=== 调试页面开始加载 ===');
+        console.log('检查DOM元素:');
+        console.log('live2d-container:', document.getElementById('live2d-container') ? '存在' : '不存在');
+        console.log('vrm-container:', document.getElementById('vrm-container') ? '存在' : '不存在');
+        console.log('live2d-canvas:', document.getElementById('live2d-canvas') ? '存在' : '不存在');
+        console.log('vrm-canvas:', document.getElementById('vrm-canvas') ? '存在' : '不存在');
+        console.log('chatContainer:', document.getElementById('chatContainer') ? '存在' : '不存在');
+        console.log('toggle-chat-btn:', document.getElementById('toggle-chat-btn') ? '存在' : '不存在');
+        console.log('micButton:', document.getElementById('micButton') ? '存在' : '不存在');
+    </script>
+    
+    <!-- 加载必要的脚本 -->
+    <script src="libs/live2dcubismcore.min.js"></script>
+    <script src="libs/live2d.min.js"></script>
+    <script src="libs/pixi.min.js"></script>
+    <script src="libs/index.min.js"></script>
+    <script src="vrm.js"></script>
+    <script src="common_ui.js"></script>
+    <script src="live2d.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>

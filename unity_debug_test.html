@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Unity WebSocket 调试工具</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .container { max-width: 800px; margin: 0 auto; }
+        .section { margin: 20px 0; padding: 15px; border: 1px solid #ddd; border-radius: 5px; }
+        .log { background: #f5f5f5; padding: 10px; height: 200px; overflow-y: auto; font-family: monospace; font-size: 12px; }
+        .btn { padding: 8px 16px; margin: 5px; background: #007bff; color: white; border: none; border-radius: 3px; cursor: pointer; }
+        .btn:hover { background: #0056b3; }
+        .status { padding: 5px 10px; border-radius: 3px; font-weight: bold; }
+        .connected { background: #d4edda; color: #155724; }
+        .disconnected { background: #f8d7da; color: #721c24; }
+        input, select { padding: 5px; margin: 5px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔧 Unity WebSocket 调试工具</h1>
+        
+        <div class="section">
+            <h3>📡 连接设置</h3>
+            <label>监控端口: <input type="number" id="monitorPort" value="48913" /></label>
+            <label>角色名称: <input type="text" id="lanlanName" value="EE" /></label>
+            <br>
+            <button class="btn" onclick="connectToUnityWS()">连接到Unity端点 (/ws/)</button>
+            <button class="btn" onclick="connectToSyncWS()">连接到同步端点 (/sync/)</button>
+            <button class="btn" onclick="disconnect()">断开连接</button>
+            <br>
+            <span id="wsStatus" class="status disconnected">未连接</span>
+        </div>
+
+        <div class="section">
+            <h3>🎮 Unity指令测试</h3>
+            <button class="btn" onclick="sendAnimationCommand()">发送动画指令 (EE_vrm_baked)</button>
+            <button class="btn" onclick="sendExpressionCommand()">发送表情指令 (happy)</button>
+            <button class="btn" onclick="sendMouthCommand()">发送口型指令</button>
+            <button class="btn" onclick="sendCustomCommand()">发送自定义指令</button>
+            <br>
+            <textarea id="customCommand" rows="3" cols="60" placeholder='{"type":"anim.play","state":"EE_vrm_baked","layer":0,"fade":0.25,"speed":1}'></textarea>
+        </div>
+
+        <div class="section">
+            <h3>🔄 API测试</h3>
+            <button class="btn" onclick="testUnityAPI()">测试 /api/unity/send</button>
+            <button class="btn" onclick="testLLMTrigger()">模拟LLM触发</button>
+        </div>
+
+        <div class="section">
+            <h3>📋 消息日志</h3>
+            <button class="btn" onclick="clearLog()">清空日志</button>
+            <div id="log" class="log"></div>
+        </div>
+
+        <div class="section">
+            <h3>📖 使用说明</h3>
+            <ul>
+                <li><strong>Unity端点 (/ws/)</strong>: Unity应该连接这个端点接收指令</li>
+                <li><strong>同步端点 (/sync/)</strong>: 主服务器用来发送指令到监控服务</li>
+                <li><strong>正常流程</strong>: LLM → /api/unity/send → 队列 → /sync/ → 广播到 /ws/</li>
+                <li><strong>检查Unity</strong>: 确保Unity连接到 ws://localhost:48912/ws/EE</li>
+            </ul>
+        </div>
+    </div>
+
+    <script>
+        let ws = null;
+        let wsType = '';
+
+        function log(message, type = 'info') {
+            const logEl = document.getElementById('log');
+            const timestamp = new Date().toLocaleTimeString();
+            const prefix = type === 'error' ? '❌' : type === 'send' ? '📤' : type === 'receive' ? '📥' : 'ℹ️';
+            const line = document.createElement('div');
+            line.innerHTML = `<span style="color: #666">[${timestamp}]</span> ${prefix} ${message}`;
+            logEl.appendChild(line);
+            logEl.scrollTop = logEl.scrollHeight;
+        }
+
+        function updateStatus(connected, endpoint = '') {
+            const statusEl = document.getElementById('wsStatus');
+            if (connected) {
+                statusEl.textContent = `已连接到 ${endpoint}`;
+                statusEl.className = 'status connected';
+            } else {
+                statusEl.textContent = '未连接';
+                statusEl.className = 'status disconnected';
+            }
+        }
+
+        function connectToUnityWS() {
+            const port = document.getElementById('monitorPort').value;
+            const name = document.getElementById('lanlanName').value;
+            const url = `ws://localhost:${port}/ws/${name}`;
+            connectWS(url, 'Unity端点');
+        }
+
+        function connectToSyncWS() {
+            const port = document.getElementById('monitorPort').value;
+            const name = document.getElementById('lanlanName').value;
+            const url = `ws://localhost:${port}/sync/${name}`;
+            connectWS(url, '同步端点');
+        }
+
+        function connectWS(url, type) {
+            if (ws) {
+                ws.close();
+            }
+            
+            wsType = type;
+            log(`尝试连接到 ${type}: ${url}`);
+            
+            ws = new WebSocket(url);
+            
+            ws.onopen = () => {
+                log(`✅ 成功连接到 ${type}`);
+                updateStatus(true, type);
+            };
+            
+            ws.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    log(`收到消息: ${JSON.stringify(data, null, 2)}`, 'receive');
+                } catch (e) {
+                    log(`收到文本: ${event.data}`, 'receive');
+                }
+            };
+            
+            ws.onclose = () => {
+                log(`❌ ${type} 连接已关闭`);
+                updateStatus(false);
+            };
+            
+            ws.onerror = (error) => {
+                log(`❌ ${type} 连接错误: ${error}`, 'error');
+                updateStatus(false);
+            };
+        }
+
+        function disconnect() {
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+        }
+
+        function sendMessage(message) {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                log('❌ WebSocket未连接', 'error');
+                return;
+            }
+            
+            const msgStr = typeof message === 'string' ? message : JSON.stringify(message);
+            ws.send(msgStr);
+            log(`发送消息: ${msgStr}`, 'send');
+        }
+
+        function sendAnimationCommand() {
+            const cmd = {
+                "type": "anim.play",
+                "state": "EE_vrm_baked",
+                "layer": 0,
+                "fade": 0.25,
+                "speed": 1
+            };
+            sendMessage(cmd);
+        }
+
+        function sendExpressionCommand() {
+            const cmd = {
+                "type": "face.expression",
+                "name": "happy",
+                "weight": 0.8
+            };
+            sendMessage(cmd);
+        }
+
+        function sendMouthCommand() {
+            const cmd = {
+                "type": "face.mouth",
+                "aa": 0.6,
+                "ee": 0.2,
+                "ih": 0,
+                "oh": 0.1,
+                "ou": 0
+            };
+            sendMessage(cmd);
+        }
+
+        function sendCustomCommand() {
+            const customText = document.getElementById('customCommand').value.trim();
+            if (!customText) {
+                log('❌ 请输入自定义指令', 'error');
+                return;
+            }
+            
+            try {
+                const cmd = JSON.parse(customText);
+                sendMessage(cmd);
+            } catch (e) {
+                log(`❌ JSON格式错误: ${e.message}`, 'error');
+            }
+        }
+
+        async function testUnityAPI() {
+            const name = document.getElementById('lanlanName').value;
+            const commands = [
+                {"type": "anim.play", "state": "EE_vrm_baked", "layer": 0, "fade": 0.25, "speed": 1},
+                {"type": "face.expression", "name": "happy", "weight": 0.8}
+            ];
+            
+            try {
+                const response = await fetch('/api/unity/send', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ lanlan_name: name, commands: commands })
+                });
+                
+                const result = await response.json();
+                log(`API响应: ${JSON.stringify(result, null, 2)}`);
+            } catch (e) {
+                log(`❌ API调用失败: ${e.message}`, 'error');
+            }
+        }
+
+        async function testLLMTrigger() {
+            log('🤖 模拟LLM生成指令...');
+            await testUnityAPI();
+            log('💡 如果Unity正确连接，应该能看到动画和表情变化');
+        }
+
+        function clearLog() {
+            document.getElementById('log').innerHTML = '';
+        }
+
+        // 页面加载时的初始化
+        window.onload = () => {
+            log('🚀 Unity WebSocket 调试工具已启动');
+            log('💡 请先确保监控服务 (monitor.py) 正在运行');
+        };
+    </script>
+</body>
+</html>

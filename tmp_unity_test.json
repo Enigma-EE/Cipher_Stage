@@ -1,0 +1,8 @@
+﻿{
+  "lanlan_name": "小天",
+  "commands": [
+    {"type":"anim.play","state":"Having A Meeting, Female","layer":0,"fade":0.25,"speed":1.0},
+    {"type":"face.expression","name":"happy","weight":0.8},
+    {"type":"face.mouth","aa":0.6,"ee":0.2,"ih":0.0,"oh":0.1,"ou":0.0}
+  ]
+}

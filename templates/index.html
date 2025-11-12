@@ -1,0 +1,1634 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <link rel="manifest" href="/static/manifest.json">
+    <!-- iOS legacy meta (deprecated); keep for backward-compat but add PWA meta -->
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black">
+    <link rel="apple-touch-icon" href="/static/xiaoba_192.png">
+    <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta charset="UTF-8">
+    <title>{{ ee_name }} Terminal - Project EE</title>
+    
+    <!-- 使用 ESM three/loader/plugin，避免 UMD/real 版本造成实例混用 -->
+<!-- Import maps for ESM builds via CDN (统一到 ESM v3) -->
+<script type="importmap">
+  {
+    "imports": {
+      "three": "/static/libs/three.module.js",
+      "three/addons/": "/static/libs/jsm/",
+        "@pixiv/three-vrm": "/static/libs/three-vrm.module.min.js",
+        "@pixiv/three-vrm-animation": "/static/libs/three-vrm-animation.module.min.js"
+    }
+  }
+</script>
+<!-- 通过 ESM 导入并暴露到全局给非模块代码使用（分步加载，确保 GLTFLoader 先就绪） -->
+<script type="module">
+(async () => {
+  // 1) three 与 GLTFLoader：即使插件失败也先暴露这些
+  const THREE_NS = await import('three');
+  const THREE = { ...THREE_NS }; // 创建可扩展的命名空间副本，便于挂载兼容属性
+  window.THREE = THREE;
+  console.log('THREE 已绑定到全局(window.THREE)，版本:', THREE.REVISION);
+
+  // 通过 import map 统一 three@0.160.1，与 VRM(v3) 插件版本完全匹配
+  const { GLTFLoader } = await import('three/addons/loaders/GLTFLoader.js');
+  window.GLTFLoaderModule = GLTFLoader;
+  window.GLTFLoader = GLTFLoader;
+  window.THREE.GLTFLoader = GLTFLoader;
+
+  // 2) VRM 插件（优先本地，其次 CDN，再回退 UMD）
+  try {
+    // 优先尝试本地 ESM 模块（请将 @pixiv/three-vrm v3 拷贝到 /static/libs/）
+    const { VRMLoaderPlugin, VRMUtils } = await import('/static/libs/three-vrm.module.min.js');
+    window.VRMLoaderPluginModule = VRMLoaderPlugin;
+    window.VRMUtils = VRMUtils;
+    window.VRMLoaderPlugin = VRMLoaderPlugin;
+    window.THREE.VRMLoaderPlugin = VRMLoaderPlugin;
+    console.log('本地 ESM VRM 插件已就绪');
+  } catch (localErr) {
+    try {
+      // 失败则使用 CDN 的 ESM 模块
+      const { VRMLoaderPlugin, VRMUtils } = await import('@pixiv/three-vrm');
+      window.VRMLoaderPluginModule = VRMLoaderPlugin;
+      window.VRMUtils = VRMUtils;
+      window.VRMLoaderPlugin = VRMLoaderPlugin;
+      window.THREE.VRMLoaderPlugin = VRMLoaderPlugin;
+      console.log('CDN ESM VRM 插件已就绪');
+    } catch (e) {
+      console.warn('VRM 插件加载失败（ESM）：', e);
+      // 离线回退：尝试加载本地 UMD 版本 three-vrm.min.js
+      try {
+        await new Promise((resolve, reject) => {
+          const s = document.createElement('script');
+          s.src = '/static/libs/three-vrm.min.js';
+          s.async = true;
+          s.onload = () => resolve();
+          s.onerror = (err) => reject(err);
+          document.head.appendChild(s);
+        });
+        // 将 UMD 暴露的插件映射到全局变量，供非模块代码使用
+        if (window.THREE) {
+          const candidate = window.THREE.VRMLoaderPlugin || (window.THREE.VRM && window.THREE.VRM.VRMLoaderPlugin);
+          if (candidate) {
+            window.VRMLoaderPlugin = candidate;
+            window.THREE.VRMLoaderPlugin = candidate;
+            console.log('UMD VRM 插件已就绪 (本地回退)');
+          } else {
+            console.warn('UMD three-vrm.min.js 已加载，但未找到 VRMLoaderPlugin');
+          }
+        }
+      } catch (err) {
+        console.warn('本地 UMD three-vrm.min.js 加载失败：', err);
+      }
+    }
+  }
+
+  // 3) VRMA 插件（优先本地，其次 CDN）
+  try {
+    const { VRMAnimationLoaderPlugin, createVRMAnimationClip } = await import('/static/libs/three-vrm-animation.module.min.js');
+    window.VRMAnimationLoaderPluginModule = VRMAnimationLoaderPlugin;
+    window.createVRMAnimationClip = createVRMAnimationClip;
+    window.VRMAnimationLoaderPlugin = VRMAnimationLoaderPlugin;
+    console.log('本地 ESM VRMA 插件已就绪');
+  } catch (localErr) {
+    try {
+      const { VRMAnimationLoaderPlugin, createVRMAnimationClip } = await import('@pixiv/three-vrm-animation');
+      window.VRMAnimationLoaderPluginModule = VRMAnimationLoaderPlugin;
+      window.createVRMAnimationClip = createVRMAnimationClip;
+      window.VRMAnimationLoaderPlugin = VRMAnimationLoaderPlugin;
+      console.log('CDN ESM VRMA 插件已就绪');
+    } catch (e) {
+      console.warn('VRMA 插件加载失败（ESM）：', e);
+    }
+  }
+})();
+</script>
+<script>
+    (function() {
+        // 将命名空间映射到全局，避免不同来源的差异
+        function mapGlobalLoaders() {
+            if (window.THREE) {
+                if (!window.GLTFLoader && window.THREE.GLTFLoader) {
+                    window.GLTFLoader = window.THREE.GLTFLoader;
+                }
+                if (!window.VRMLoaderPlugin) {
+                    if (window.THREE.VRMLoaderPlugin) window.VRMLoaderPlugin = window.THREE.VRMLoaderPlugin;
+                    else if (window.THREE.VRM && window.THREE.VRM.VRMLoaderPlugin) window.VRMLoaderPlugin = window.THREE.VRM.VRMLoaderPlugin;
+                }
+                // 暴露 VRMA 插件与工具（UMD 版本）
+                if (!window.VRMAnimationLoaderPlugin) {
+                    if (window.THREE.VRMAnimationLoaderPlugin) window.VRMAnimationLoaderPlugin = window.THREE.VRMAnimationLoaderPlugin;
+                    else if (window.THREE.VRM && window.THREE.VRM.VRMAnimationLoaderPlugin) window.VRMAnimationLoaderPlugin = window.THREE.VRM.VRMAnimationLoaderPlugin;
+                }
+                if (!window.createVRMAnimationClip) {
+                    if (window.THREE.createVRMAnimationClip) window.createVRMAnimationClip = window.THREE.createVRMAnimationClip;
+                    else if (window.THREE.VRM && window.THREE.VRM.createVRMAnimationClip) window.createVRMAnimationClip = window.THREE.VRM.createVRMAnimationClip;
+                }
+            }
+        }
+        mapGlobalLoaders();
+        window.addEventListener('load', mapGlobalLoaders);
+    })();
+</script>
+    <style>
+        html, body {
+            height: 100%;
+            margin: 0;
+            padding: 0;
+            /*background: #fff;*/
+            background: transparent;
+            color: #222;
+            font-family: 'Segoe UI', Arial, sans-serif;
+            pointer-events: none; /* 允许鼠标事件穿透 */
+        }
+
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+            to {
+                opacity: 0.85;
+                transform: translateY(0);
+            }
+        }
+        
+
+        /* 响应式设计 */
+        @media (max-width: 480px) {
+            .container {
+                width: 100%;
+                height: 100%;
+            }
+        }
+
+        #live2d-container {
+            position: fixed;
+            right: 0px;
+            bottom: 0px;
+            width: 100%;
+            height: 100%;
+            z-index: 10;
+            pointer-events: none;
+            background: none;
+            opacity: 1;
+            overflow: hidden;
+            visibility: visible;
+            transition: all 1s ease-in-out, height 0ms 1s, width 0ms 1s, visibility 0ms 1s;
+        }
+
+        #vrm-container {
+            position: fixed;
+            right: 0px;
+            bottom: 0px;
+            width: 100%;
+            height: 100%;
+            z-index: 10;
+            pointer-events: none;
+            background: none;
+            opacity: 1;
+            overflow: hidden;
+            visibility: visible;
+            transition: all 1s ease-in-out, height 0ms 1s, width 0ms 1s, visibility 0ms 1s;
+        }
+
+        #vrm-canvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+
+        #live2d-container.minimized {
+            right: -800px; /* 向右侧移出屏幕 */
+            opacity: 0;
+            visibility: hidden;
+        }
+
+        #live2d-canvas {
+            right: 0;
+            bottom: 0;
+            pointer-events: none;
+            /*width: auto;*/
+            /*height: auto;*/
+            display: block;
+            opacity: 1;
+            visibility: visible;
+            background: transparent;
+        }
+
+        #live2d-canvas.minimized {
+            opacity: 0;
+            visibility: hidden;
+        }
+
+        #chat-container {
+            margin-bottom: 50px;
+            pointer-events: auto; /* 恢复鼠标交互 */
+            position: fixed;
+            left: 20px;
+            bottom: 20px;
+            width: 340px;
+            max-height: 300px;
+            height: 300px;
+            background: #f7f8fa;
+            opacity: 0.7;
+            border-radius: 12px;
+            padding: 16px;
+            box-sizing: border-box;
+            overflow: hidden; /* 重要：改为 hidden，滚动交给内部 wrapper */
+            z-index: 100;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+            scroll-behavior: smooth;
+            display: flex; /* 使用 flex 布局 */
+            flex-direction: column;
+            /* 添加过渡效果，让尺寸变化平滑 */
+            transition: width 0.3s ease, height 0.3s ease, max-height 0.3s ease, padding 0.3s ease;
+        }
+
+        /* 内部内容包裹器，负责滚动 */
+        #chat-content-wrapper {
+            pointer-events: auto; /* 恢复鼠标交互 */
+            flex-grow: 1; /* 占据可用空间 */
+            padding: 16px; /* 内边距移到这里 */
+            padding-left: 8px; /* 内边距移到这里 */
+            overflow-y: auto; /* 滚动条在这里 */
+            scroll-behavior: smooth;
+            /* 添加过渡，让内容隐藏/显示更平滑 */
+            transition: opacity 0.2s ease, visibility 0.2s ease;
+            opacity: 0.7;
+            visibility: visible;
+        }
+
+        /* 切换按钮样式 */
+        #toggle-chat-btn {
+            pointer-events: auto; /* 恢复鼠标交互 */
+            position: absolute; /* 绝对定位于容器内 */
+            top: 8px;
+            right: 8px;
+            width: 24px;
+            height: 24px;
+            background: #e0e1e2;
+            opacity: 0.8;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+            line-height: 18px; /* 垂直居中 */
+            text-align: center;
+            z-index: 101; /* 确保在内容之上 */
+            padding: 0;
+        }
+
+        #toggle-chat-btn:hover {
+            background: #cacbcd;
+        }
+
+        /* --- 最小化状态 --- */
+        #chat-container.minimized {
+            background: transparent;
+            opacity: 1;
+            width: 60px; /* 最小化宽度 */
+            height: 40px; /* 最小化高度 */
+            max-height: 40px;
+            padding: 0; /* 移除内边距 */
+            cursor: pointer; /* 让整个小方块可点击（虽然按钮也在） */
+        }
+
+        #chat-container.minimized #chat-content-wrapper {
+            /* 隐藏内容区域 */
+            opacity: 0;
+            visibility: hidden;
+            height: 0; /* 确保不占空间 */
+            padding: 0;
+            overflow: hidden; /* 隐藏滚动条 */
+        }
+
+        #chat-container.minimized #toggle-chat-btn {
+            /* 将按钮居中显示 */
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+        }
+
+        #input-row {
+            display: flex;
+            margin-top: 12px;
+        }
+
+        #userInput {
+            flex: 1;
+            padding: 8px;
+            border-radius: 6px;
+            border: 1px solid #ccc;
+            font-size: 1rem;
+            background: #fff;
+            color: #222;
+        }
+
+        #sendButton {
+            margin-left: 8px;
+            padding: 8px 16px;
+            border-radius: 6px;
+            border: none;
+            background: #4f8cff;
+            color: #fff;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        #sendButton:active {
+            background: #2662c8;
+        }
+
+        #sendButton:disabled {
+            background: #b0c4de;
+            cursor: not-allowed;
+            opacity: 0.7;
+        }
+
+        #sidebar {
+            /*background: #f7f8fa;*/
+            /*opacity: 0.7;*/
+            border-radius: 12px;
+            box-sizing: border-box;
+            box-shadow: None;
+
+            background: transparent;
+            pointer-events: auto; /* 恢复鼠标交互 */
+            position: fixed;
+            left: 20px;
+            top: 20px;
+            z-index: 20;
+            transition: width 0.3s ease, min-width 0.3s ease, height 0.3s ease, padding 0.3s ease, opacity 0.3s;
+        }
+
+        #sidebarbox {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            min-width: 150px;
+            transition: width 0.3s ease, min-width 0.3s ease, height 0.3s ease, padding 0.3s ease, opacity 0.3s;
+        }
+
+        #sidebar.minimized {
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+            width: 48px;
+            min-width: 0;
+            height: 48px;
+            padding: 0;
+            opacity: 0.9;
+            background: transparent;
+            gap: 0;
+            overflow: hidden;
+            /* 只显示折叠按钮 */
+            position: fixed;
+            left: 20px;
+            top: 20px;
+        }
+
+        #sidebar.minimized .side-btn:not(#toggle-sidebar-btn) {
+            /* 透明度0%，鼠标穿透 */
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        #sidebar.minimized #status {
+            /* 透明度0%，鼠标穿透 */
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        #toggle-sidebar-btn {
+            position: absolute;
+
+            top: -10px;
+            right: -10px;
+            width: 24px;
+            height: 24px;
+            padding: 0;
+
+            font-weight: bold;
+            text-align: center;
+
+            pointer-events: auto;
+            z-index: 31;
+            background: #e0e1e2;
+            color: #333;
+            border-radius: 4px;
+            border: none;
+            cursor: pointer;
+            opacity: 0.8;
+            transition: background 0.2s, color 0.2s, box-shadow 0.2s, top 0.2s, right 0.2s;
+        }
+
+        #sidebar.minimized #toggle-sidebar-btn {
+            /* 将按钮居中显示 */
+            top: 24px;
+            right: 0px;
+            transform: translate(-50%, -50%);
+        }
+
+        #toggle-sidebar-btn:hover {
+            background: #cacbcd;
+        }
+
+        .side-btn {
+            padding: 10px 20px;
+            border-radius: 8px;
+            border: none;
+            background: #333;
+            color: #fff;
+            font-size: 1rem;
+            cursor: pointer;
+            margin-bottom: 4px;
+            /* 透明度100%，鼠标可点击 */
+            opacity: 1;
+            pointer-events: auto;
+            transition: background 0.2s, color 0.2s, box-shadow 0.2s, opacity 0.2s;
+        }
+
+        .side-btn:active {
+            background: #555;
+        }
+
+        .side-btn:disabled {
+            background: #e0e0e0;
+            color: #888;
+            cursor: not-allowed;
+            border: 1px solid #ccc;
+            opacity: 0.7;
+        }
+
+        .side-btn:hover:not(:disabled) {
+            background: #4f8cff;
+            color: #fff;
+        }
+
+        .mobile-text {
+            display: none;
+        }
+
+        .desktop-text {
+            display: inline;
+        }
+
+        #status {
+            /*margin-top: 5px;*/
+            color: #4f8cff;
+            background: transparent;
+            font-size: 0.95rem;
+            max-width: 150px;
+            word-break: break-all;
+        }
+
+        /* Agent control panel (top-right) */
+        #agent-panel {
+            position: fixed;
+            top: 16px;
+            right: 16px;
+            z-index: 30;
+            pointer-events: auto;
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+            gap: 6px;
+            background: rgba(255,255,255,0.6);
+            border-radius: 12px;
+            padding: 12px 16px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            backdrop-filter: blur(8px);
+            min-width: 200px;
+        }
+        #agent-controls {
+            display: flex;
+            flex-direction: column;
+            gap: 0;
+            width: 100%;
+        }
+        
+        .master-control-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            justify-content: space-between;
+            width: 100%;
+            padding-bottom: 0;
+            border-bottom: none;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        
+        .master-control-row.expanded {
+            padding-bottom: 8px;
+            border-bottom: 1px solid rgba(79, 140, 255, 0.2);
+        }
+        
+        .sub-controls-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            justify-content: space-between;
+            width: 100%;
+            opacity: 0;
+            transform: translateY(-10px);
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            pointer-events: none;
+            max-height: 0;
+            margin-top: 0;
+            overflow: hidden;
+        }
+        
+        .sub-controls-row.show {
+            opacity: 1;
+            transform: translateY(0);
+            pointer-events: auto;
+            max-height: 40px;
+            margin-top: 8px;
+        }
+        
+        .control-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        
+        .control-label {
+            font-size: 0.85rem;
+            color: #333;
+            white-space: nowrap;
+            font-weight: 500;
+        }
+        
+        .master-control-row .control-label {
+            font-size: 0.9rem;
+            color: #4f8cff;
+            font-weight: 600;
+        }
+        .switch {
+            position: relative;
+            display: inline-block;
+            width: 48px;
+            height: 24px;
+            flex-shrink: 0;
+        }
+        .switch input { display: none; }
+        .slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background-color: #ccc;
+            transition: .2s;
+            border-radius: 24px;
+        }
+        .slider:before {
+            position: absolute;
+            content: "";
+            height: 18px; width: 18px;
+            left: 3px; bottom: 3px;
+            background-color: white;
+            transition: .2s;
+            border-radius: 50%;
+        }
+        input:checked + .slider {
+            background-color: #4f8cff;
+        }
+        input:checked + .slider:before {
+            transform: translateX(24px);
+        }
+        #agent-status {
+            font-size: 0.9rem;
+            color: #4f8cff;
+            max-width: 100%;
+            margin-top: 8px;
+            min-height: 0;
+            height: 0;
+            overflow: hidden;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        
+        #agent-status:not(:empty) {
+            min-height: 1.2em;
+            height: auto;
+            margin-top: 8px;
+        }
+        
+        /* Task progress display */
+        #task-progress {
+            margin-top: 12px;
+            padding: 12px;
+            background: rgba(255,255,255,0.7);
+            border-radius: 8px;
+            border: 1px solid rgba(79,140,255,0.3);
+            max-width: 100%;
+            display: none; /* Hidden by default */
+            backdrop-filter: blur(5px);
+        }
+        
+        #task-progress.show {
+            display: block;
+        }
+        
+        .task-progress-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 6px;
+            font-size: 0.85rem;
+            font-weight: 500;
+            color: #333;
+        }
+        
+        .task-progress-stats {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 8px;
+            font-size: 0.75rem;
+            color: #666;
+        }
+        
+        .stat-item {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+        
+        .stat-count {
+            background: #4f8cff;
+            color: white;
+            padding: 2px 6px;
+            border-radius: 10px;
+            font-size: 0.7rem;
+            font-weight: 500;
+        }
+        
+        .task-list {
+            max-height: 120px;
+            overflow-y: auto;
+            font-size: 0.8rem;
+        }
+        
+        .task-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 0;
+            border-bottom: 1px solid rgba(0,0,0,0.05);
+        }
+        
+        .task-item:last-child {
+            border-bottom: none;
+        }
+        
+        .task-status {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+        
+        .task-status.running {
+            background: #4f8cff;
+            animation: pulse 1.5s infinite;
+        }
+        
+        .task-status.queued {
+            background: #ffa500;
+        }
+        
+        .task-status.completed {
+            background: #28a745;
+        }
+        
+        .task-status.failed {
+            background: #dc3545;
+        }
+        
+        .task-info {
+            flex: 1;
+            min-width: 0;
+        }
+        
+        .task-title {
+            color: #333;
+            font-weight: 500;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        
+        .task-meta {
+            color: #666;
+            font-size: 0.7rem;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        
+        /* Collapse/Expand button - 模仿左上角按钮样式 */
+        #agent-collapse-btn {
+            position: absolute;
+            top: -10px;
+            right: -10px;
+            width: 24px;
+            height: 24px;
+            padding: 0;
+            font-weight: bold;
+            text-align: center;
+            pointer-events: auto;
+            z-index: 31;
+            background: #e0e1e2;
+            color: #333;
+            border-radius: 4px;
+            border: none;
+            cursor: pointer;
+            opacity: 0.8;
+            transition: background 0.2s, color 0.2s, box-shadow 0.2s, top 0.2s, right 0.2s;
+        }
+        
+        #agent-collapse-btn:hover {
+            background: #cacbcd;
+        }
+        
+        #agent-panel.collapsed {
+            width: 48px;
+            height: 48px;
+            min-width: 48px;
+            max-width: 48px;
+            overflow: hidden;
+            padding: 0;
+            background: transparent;
+            box-shadow: none;
+            border-radius: 0;
+            backdrop-filter: none;
+        }
+        
+        #agent-panel.collapsed * {
+            display: none !important;
+        }
+        
+        #agent-panel.collapsed #agent-collapse-btn {
+            display: block !important;
+        }
+        
+        #agent-panel.collapsed #agent-controls,
+        #agent-panel.collapsed #agent-status,
+        #agent-panel.collapsed #task-progress {
+            display: none !important;
+        }
+        
+        #agent-panel.collapsed #agent-collapse-btn {
+            /* 将按钮居中显示，模仿左上角按钮的折叠状态 */
+            top: 24px;
+            right: 0px;
+            transform: translate(-50%, -50%);
+        }
+
+        @media only screen and (max-width: 768px) {
+            #live2d-container {
+                position: fixed;
+                right: 0;
+                bottom: 0;
+                width: 100%;
+                height: 100%;
+                z-index: 5;
+            }
+
+            #chat-container {
+                width: 45vw;
+                left: 0;
+                bottom: 0;
+                max-height: 40vh;
+                height: 40vh;
+                padding: 0;
+                margin-bottom: 5px;
+            }
+
+            #sidebar {
+                left: 5vw;
+                top: 5vh;
+                /* width: 90vw;
+                flex-direction: row;
+                flex-wrap: wrap; */
+                /*gap: 8px;*/
+            }
+
+            #sidebarbox {           
+                flex-direction: row;
+                flex-wrap: wrap;
+            }
+
+            .side-btn {
+                flex: 1 1 40%;
+                padding: 6px 10px;
+                font-size: 0.85rem;
+            }
+
+            .mobile-text {
+                display: inline;
+            }
+
+            .desktop-text {
+                display: none;
+            }
+            
+            /* Mobile agent panel adjustments */
+            #agent-panel {
+                top: 8px;
+                right: 8px;
+                max-width: 90vw;
+                min-width: auto;
+                padding: 10px 12px;
+            }
+            
+            #agent-panel.collapsed {
+                width: 40px;
+                height: 40px;
+                min-width: 40px;
+                max-width: 40px;
+                background: transparent;
+                box-shadow: none;
+                border-radius: 0;
+                backdrop-filter: none;
+            }
+            
+            #agent-panel.collapsed * {
+                display: none !important;
+            }
+            
+            #agent-panel.collapsed #agent-collapse-btn {
+                display: block !important;
+            }
+            
+            #agent-panel.collapsed #agent-collapse-btn {
+                top: 20px;
+                right: 0px;
+            }
+            
+            #agent-controls {
+                gap: 0;
+            }
+            
+            .master-control-row.expanded {
+                padding-bottom: 6px;
+            }
+            
+            .sub-controls-row.show {
+                margin-top: 6px;
+            }
+            
+            .control-label {
+                font-size: 0.8rem;
+            }
+            
+            .master-control-row .control-label {
+                font-size: 0.85rem;
+            }
+            
+            #agent-status:not(:empty) {
+                margin-top: 6px;
+            }
+            
+            #task-progress {
+                max-width: 90vw;
+                margin-top: 8px;
+                padding: 10px;
+            }
+            
+            .task-progress-stats {
+                flex-wrap: wrap;
+                gap: 4px;
+            }
+            
+            .stat-item {
+                font-size: 0.7rem;
+            }
+        }
+
+        /* 控制面板样式 */
+        .control-panel {
+            position: fixed;
+            bottom: 20px;
+            left: 20px;
+            right: 20px;
+            background: rgba(255, 255, 255, 0.9);
+            border-radius: 12px;
+            padding: 16px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+            backdrop-filter: blur(10px);
+            z-index: 25;
+            pointer-events: auto;
+            min-width: 200px;
+            max-width: calc(100vw - 40px);
+            transition: all 0.3s ease;
+        }
+
+        .control-panel.hidden {
+            opacity: 0;
+            visibility: hidden;
+            transform: translateY(20px);
+        }
+
+        .control-panel h3 {
+            margin: 0 0 12px 0;
+            font-size: 1rem;
+            color: #333;
+            text-align: center;
+            border-bottom: 1px solid rgba(79, 140, 255, 0.2);
+            padding-bottom: 8px;
+        }
+
+        .control-group {
+            margin-bottom: 12px;
+        }
+
+        .control-group:last-child {
+            margin-bottom: 0;
+        }
+
+        .control-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 8px;
+            flex-wrap: wrap;
+        }
+
+        .control-row:last-child {
+            margin-bottom: 0;
+        }
+
+        .control-label {
+            font-size: 0.85rem;
+            color: #333;
+            font-weight: 500;
+        }
+
+        .control-button {
+            padding: 6px 12px;
+            border: none;
+            border-radius: 6px;
+            background: #4f8cff;
+            color: white;
+            font-size: 0.8rem;
+            cursor: pointer;
+            transition: background 0.2s;
+            margin: 2px;
+        }
+
+        .control-button:hover {
+            background: #3a7bd5;
+        }
+
+        .control-button:active {
+            background: #2662c8;
+        }
+
+        .control-button.secondary {
+            background: #6c757d;
+        }
+
+        .control-button.secondary:hover {
+            background: #5a6268;
+        }
+
+        .size-controls {
+            display: flex;
+            gap: 4px;
+            flex-wrap: wrap;
+        }
+
+        .animation-controls {
+            display: flex;
+            gap: 4px;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+
+        .animation-controls .control-button {
+            font-size: 0.75rem;
+            padding: 4px 8px;
+        }
+
+        .control-panel .animation-controls {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+        
+        .control-panel .animation-controls .control-button {
+            font-size: 0.8rem;
+            padding: 6px 10px;
+        }
+        
+        .control-panel .control-button.secondary {
+            background-color: #ff9800;
+        }
+        
+        .control-panel .control-button.secondary:hover {
+            background-color: #f57c00;
+        }
+        
+        /* 响应式设计 */
+        @media (max-width: 768px) {
+            .control-panel {
+                width: 280px;
+                font-size: 0.9rem;
+            }
+            
+            .control-panel .control-button {
+                padding: 8px 12px;
+                font-size: 0.8rem;
+            }
+        }
+    </style>
+</head>
+<body>
+<div id="agent-panel">
+    <button id="agent-collapse-btn" title="收起/展开">−</button>
+    <div id="agent-controls">
+        <div class="master-control-row">
+            <div class="control-item">
+                <span class="control-label">Agent模式总开关</span>
+                <label class="switch"><input id="agentMasterToggle" type="checkbox"><span class="slider"></span></label>
+            </div>
+        </div>
+        <div class="sub-controls-row" id="sub-controls-row">
+            <div class="control-item">
+                <span class="control-label">键鼠</span>
+                <label class="switch"><input id="agentCUtoggle" type="checkbox" disabled><span class="slider"></span></label>
+            </div>
+            <div class="control-item">
+                <span class="control-label">MCP</span>
+                <label class="switch"><input id="agentMCPtoggle" type="checkbox" disabled><span class="slider"></span></label>
+            </div>
+        </div>
+    </div>
+    <div id="agent-status"></div>
+    <div id="task-progress">
+        <div class="task-progress-header">
+            <span>任务进度</span>
+        </div>
+        <div class="task-progress-stats">
+            <div class="stat-item">
+                <span>运行中</span>
+                <span class="stat-count" id="running-count">0</span>
+            </div>
+            <div class="stat-item">
+                <span>排队中</span>
+                <span class="stat-count" id="queued-count">0</span>
+            </div>
+            <div class="stat-item">
+                <span>已完成</span>
+                <span class="stat-count" id="completed-count">0</span>
+            </div>
+        </div>
+        <div class="task-list" id="task-list">
+            <!-- 任务列表将在这里动态生成 -->
+        </div>
+    </div>
+</div>
+<div id="sidebar">
+    <div id="sidebarbox">
+        <button id="toggle-sidebar-btn" title="折叠侧边栏">—</button>
+        <div class="lang-switch" style="margin: 6px 0; display: flex; align-items: center; gap: 8px;">
+            <label id="lang-label" for="lang-select">语言</label>
+            <select id="lang-select" style="padding: 4px 6px; border-radius: 6px;">
+                <option value="zh-CN">中文</option>
+                <option value="en">English</option>
+            </select>
+        </div>
+        <button id="micButton" class="side-btn">🎤 开始聊天</button>
+        <button id="muteButton" class="side-btn" disabled>⏸️ 休息一下</button>
+        <button id="screenButton" class="side-btn" disabled><span class="desktop-text">🖥️ 屏幕共享</span><span class="mobile-text">📷 摄像头分享</span></button>
+        <button id="stopButton" class="side-btn" disabled>🛑 停止共享</button>
+        <button id="resetSessionButton" class="side-btn" disabled>👋 请她离开</button>
+        <div id="status"></div>
+    </div>
+</div>
+<div id="chat-container">
+    <button id="toggle-chat-btn" title="Minimize">—</button>
+    <div id="chat-content-wrapper">
+        <div id="chatContainer"></div>
+        <div id="input-row">
+            <input type="text" id="userInput" placeholder="输入你的消息..." autocomplete="off"/>
+            <button id="sendButton">发送</button>
+        </div>
+    </div>
+</div>
+<div id="live2d-container">
+    <canvas id="live2d-canvas"></canvas>
+</div>
+<div id="vrm-container" style="display: none;">
+    <canvas id="vrm-canvas"></canvas>
+</div>
+
+<script>
+    // 从模板变量中注入值（新命名与兼容保留）
+    const ee_config = { ee_name: {{ ee_name | tojson }} };
+    const lanlan_config = { lanlan_name: ee_config.ee_name }; // 兼容保留
+    const cubism4Model = {{ model_path | tojson }};
+    // 使用window对象避免IDE语法检查错误
+    window.focus_mode = {{ focus_mode | tojson }};
+    // 设置默认模型类型为VRM，以便加载EE.vrm模型
+    window.modelType = 'vrm';
+    // 统一获取角色名（兼容老字段）
+    window.getEEName = function() {
+      try {
+        return (ee_config && ee_config.ee_name) || (lanlan_config && lanlan_config.lanlan_name) || '';
+      } catch (_) { return ''; }
+    };
+</script>
+<script>
+    // Beacon功能 - 页面关闭时发送信号给服务器
+    let beaconSent = false;
+
+    function sendBeacon() {
+        if (beaconSent) return; // 防止重复发送
+        beaconSent = true;
+        
+        try {
+            // 使用navigator.sendBeacon确保信号不被拦截
+            const success = navigator.sendBeacon('/api/beacon/shutdown', JSON.stringify({
+                timestamp: Date.now(),
+                action: 'shutdown'
+            }));
+            
+            if (success) {
+                console.log('Beacon信号已发送');
+            } else {
+                console.warn('Beacon发送失败，尝试使用fetch');
+                // 备用方案：使用fetch
+                fetch('/api/beacon/shutdown', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        timestamp: Date.now(),
+                        action: 'shutdown'
+                    }),
+                    keepalive: true // 确保请求在页面关闭时仍能发送
+                }).catch(err => console.log('备用beacon发送失败:', err));
+            }
+        } catch (e) {
+            console.log('Beacon发送异常:', e);
+        }
+    }
+
+    // 监听页面关闭事件
+    window.addEventListener('beforeunload', sendBeacon);
+    window.addEventListener('unload', sendBeacon);
+</script>
+<script src="/static/libs/live2dcubismcore.min.js"></script>  <!-- Cubism 4核心库（支持Cubism 3/4模型） -->
+<script src="/static/libs/live2d.min.js"></script>  <!-- Cubism 2.1核心库（支持旧模型） -->
+<script src="/static/libs/pixi.min.js"></script>  <!-- PixiJS v7 CDN -->
+<script src="/static/libs/index.min.js"></script>  <!-- pixi-live2d-display v0.5.0-ls-6（RaSan147 fork，支持v7） -->
+<script src="/static/vrm.js"></script>
+<script src="/static/i18n.js"></script>
+<script src="/static/common_ui.js"></script>
+<script src="/static/live2d.js"></script>
+<script src="/static/app.js"></script>
+<script>
+  // Bind language selector to I18N
+  document.addEventListener('DOMContentLoaded', function () {
+    const sel = document.getElementById('lang-select');
+    if (sel && window.I18N) {
+      try { sel.value = I18N.lang; } catch (_) {}
+      sel.addEventListener('change', (e) => I18N.setLanguage(e.target.value));
+      window.addEventListener('ee:language-changed', (ev) => {
+        try { sel.value = ev.detail.lang; } catch (_) {}
+      });
+    }
+  });
+</script>
+<script>
+  const agentStatusEl = document.getElementById('agent-status');
+  let agentStatusTimer = null;
+  const masterToggle = document.getElementById('agentMasterToggle');
+  const cuToggle = document.getElementById('agentCUtoggle');
+  const mcpToggle = document.getElementById('agentMCPtoggle');
+  
+  // Task progress elements
+  const taskProgressEl = document.getElementById('task-progress');
+  const runningCountEl = document.getElementById('running-count');
+  const queuedCountEl = document.getElementById('queued-count');
+  const completedCountEl = document.getElementById('completed-count');
+  const taskListEl = document.getElementById('task-list');
+  
+  // Collapse button
+  const agentCollapseBtn = document.getElementById('agent-collapse-btn');
+  const agentPanel = document.getElementById('agent-panel');
+  
+  // Task polling
+  let taskPollingInterval = null;
+  let lastTaskData = null;
+  let pollingErrorCount = 0;
+  let maxPollingErrors = 3;
+  let pollingInterval = 1000; // 1秒轮询一次，确保任务状态及时更新
+
+  function setStatus(msg) {
+    if (agentStatusTimer) { clearTimeout(agentStatusTimer); agentStatusTimer = null; }
+    if (!msg) { agentStatusEl.textContent = ''; return; }
+    agentStatusEl.textContent = msg;
+    agentStatusTimer = setTimeout(() => { agentStatusEl.textContent = ''; }, 5000);
+  }
+  function resetToggles() {
+    masterToggle.checked = false;
+    cuToggle.checked = false; cuToggle.disabled = true;
+    mcpToggle.checked = false; mcpToggle.disabled = true;
+    
+    // Reset UI state
+    const masterControlRow = document.querySelector('.master-control-row');
+    masterControlRow.classList.remove('expanded');
+    
+    const subControlsRow = document.getElementById('sub-controls-row');
+    subControlsRow.classList.remove('show');
+    
+    const taskProgressEl = document.getElementById('task-progress');
+    taskProgressEl.classList.remove('show');
+  }
+  
+  // Task progress functions
+  function startTaskPolling() {
+    if (taskPollingInterval) {
+      clearInterval(taskPollingInterval);
+    }
+    // 持续轮询，固定1秒间隔，不根据任务状态停止
+    console.log('启动持续轮询，间隔1秒');
+    taskPollingInterval = setInterval(updateTaskStatus, 1000);
+    updateTaskStatus(); // 立即执行一次
+  }
+  
+  function stopTaskPolling() {
+    if (taskPollingInterval) {
+      clearTimeout(taskPollingInterval);
+      taskPollingInterval = null;
+    }
+  }
+  
+  async function updateTaskStatus() {
+    try {
+      // 使用更轻量的请求，只获取必要信息，添加 AbortController 避免长时间阻塞
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 3000); // 3秒超时
+      
+      const response = await fetch('/api/agent/task_status', {
+        method: 'GET',
+        headers: {
+          'Cache-Control': 'no-cache'
+        },
+        signal: controller.signal
+      });
+      
+      clearTimeout(timeoutId);
+      
+      if (!response.ok) {
+        pollingErrorCount++;
+        console.warn('Task status request failed:', response.status);
+        
+        // 不允许停止轮询，只记录错误
+        if (pollingErrorCount >= maxPollingErrors) {
+          console.warn('Too many polling errors, but continuing to poll');
+          setStatus('任务状态更新失败，但继续尝试');
+        }
+        return;
+      }
+      
+      // 重置错误计数
+      pollingErrorCount = 0;
+      
+      const data = await response.json();
+      if (data.success) {
+        // 使用 requestAnimationFrame 确保 UI 更新不阻塞
+        requestAnimationFrame(() => {
+          updateTaskDisplay(data);
+        });
+        lastTaskData = data;
+        
+        // 持续轮询模式下，不需要检查任务状态来启动/停止轮询
+        // 轮询由 masterToggle 控制，开启时始终进行，关闭时停止
+      }
+    } catch (error) {
+      pollingErrorCount++;
+      
+      // 区分不同类型的错误
+      if (error.name === 'AbortError') {
+        console.warn('Task status request timeout, continuing to poll');
+        setStatus('任务状态请求超时，继续尝试');
+      } else {
+        console.warn('Task status update failed:', error);
+        
+        // 不允许停止轮询，只记录错误
+        if (pollingErrorCount >= maxPollingErrors) {
+          console.warn('Too many polling errors, but continuing to poll');
+          setStatus('任务状态更新失败，但继续尝试');
+        }
+      }
+    }
+  }
+  
+  function updateTaskDisplay(data) {
+    // Update counts
+    runningCountEl.textContent = data.running_count || 0;
+    completedCountEl.textContent = data.completed_count || 0;
+    queuedCountEl.textContent = data.queued_count || 0;
+    
+    // Update task list
+    const tasks = data.tasks || [];
+    taskListEl.innerHTML = '';
+    
+    if (tasks.length === 0) {
+      taskListEl.innerHTML = '<div style="text-align: center; color: #999; padding: 10px;">暂无任务</div>';
+      return;
+    }
+    
+    // Show only active tasks (running, queued, failed)
+    const activeTasks = tasks.filter(task => 
+      ['running', 'queued', 'failed'].includes(task.status)
+    );
+    
+    activeTasks.forEach(task => {
+      const taskItem = document.createElement('div');
+      taskItem.className = 'task-item';
+      taskItem.dataset.startTime = task.start_time || '';
+      
+      const statusDot = document.createElement('div');
+      statusDot.className = `task-status ${task.status}`;
+      
+      const taskInfo = document.createElement('div');
+      taskInfo.className = 'task-info';
+      
+      const taskTitle = document.createElement('div');
+      taskTitle.className = 'task-title';
+      taskTitle.textContent = task.params?.query || task.params?.instruction || '未知任务';
+      
+      const taskMeta = document.createElement('div');
+      taskMeta.className = 'task-meta';
+    const roleName = task.ee_name || task.lanlan_name || '未知';
+      
+      // 创建时长显示元素，用于实时更新
+      const durationSpan = document.createElement('span');
+      durationSpan.className = 'task-duration';
+      
+      // 计算并显示运行/排队时长
+      const updateDuration = () => {
+        if (task.start_time) {
+          const startTime = new Date(task.start_time);
+          const now = new Date();
+          const duration = now - startTime;
+          
+          if (duration < 60000) { // 小于1分钟
+            durationSpan.textContent = `${Math.floor(duration / 1000)}秒`;
+          } else if (duration < 3600000) { // 小于1小时
+            durationSpan.textContent = `${Math.floor(duration / 60000)}分钟`;
+          } else { // 大于等于1小时
+            const hours = Math.floor(duration / 3600000);
+            const minutes = Math.floor((duration % 3600000) / 60000);
+            durationSpan.textContent = `${hours}小时${minutes}分钟`;
+          }
+        } else {
+          durationSpan.textContent = '';
+        }
+      };
+      
+      // 立即更新一次
+      updateDuration();
+      
+      // 每秒更新一次时长
+      const durationInterval = setInterval(() => {
+        if (taskItem.parentNode) {
+          updateDuration();
+        } else {
+          // 如果任务项被移除，清除定时器
+          clearInterval(durationInterval);
+        }
+      }, 1000);
+      
+    taskMeta.textContent = `${roleName} • `;
+      taskMeta.appendChild(durationSpan);
+      
+      taskInfo.appendChild(taskTitle);
+      taskInfo.appendChild(taskMeta);
+      taskItem.appendChild(statusDot);
+      taskItem.appendChild(taskInfo);
+      taskListEl.appendChild(taskItem);
+    });
+  }
+  
+  // Collapse/Expand functionality
+  function toggleAgentPanel() {
+    agentPanel.classList.toggle('collapsed');
+    const isCollapsed = agentPanel.classList.contains('collapsed');
+    agentCollapseBtn.textContent = isCollapsed ? '+' : '−';
+    agentCollapseBtn.title = isCollapsed ? '展开' : '收起';
+  }
+
+  async function checkToolServerHealth() {
+    try {
+      const resp = await fetch(`/api/agent/health`);
+      if (!resp.ok) throw new Error('not ok');
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  masterToggle.addEventListener('change', async () => {
+    if (masterToggle.checked) {
+      try {
+        const ok = await checkToolServerHealth();
+        if (!ok) throw new Error('tool server down');
+      } catch (e) {
+        setStatus('Agent服务器未启动');
+        resetToggles();
+        return;
+      }
+      setStatus('Agent模式已开启');
+      cuToggle.disabled = false;
+      mcpToggle.disabled = false;
+      
+      // Expand master control row with border and padding
+      const masterControlRow = document.querySelector('.master-control-row');
+      masterControlRow.classList.add('expanded');
+      
+      // Show sub controls row with animation
+      const subControlsRow = document.getElementById('sub-controls-row');
+      subControlsRow.classList.add('show');
+      
+      // Show task progress and start continuous polling
+      taskProgressEl.classList.add('show');
+      console.log('Agent模式已开启，显示任务进度面板，启动持续轮询');
+      
+      try {
+        const r = await fetch('/api/agent/flags', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ee_name: getEEName(), lanlan_name: getEEName(), flags: {agent_enabled:true, computer_use_enabled:false, mcp_enabled:false}})});
+        if (!r.ok) throw new Error('main_server rejected');
+        
+        // 开启成功后，立即启动持续轮询
+        console.log('Agent标志设置成功，启动持续轮询');
+        startTaskPolling();
+        
+      } catch(e) {
+        // auto close on failure
+        resetToggles();
+        setStatus('开启失败');
+        // Hide task progress and stop polling
+        taskProgressEl.classList.remove('show');
+        stopTaskPolling();
+      }
+    } else {
+      setStatus('');
+      cuToggle.checked = false; cuToggle.disabled = true;
+      mcpToggle.disabled = false; mcpToggle.disabled = true;
+      
+      // Collapse master control row (remove border and padding)
+      const masterControlRow = document.querySelector('.master-control-row');
+      masterControlRow.classList.remove('expanded');
+      
+      // Hide sub controls row with animation
+      const subControlsRow = document.getElementById('sub-controls-row');
+      subControlsRow.classList.remove('show');
+      
+      // Hide task progress and stop polling
+      taskProgressEl.classList.remove('show');
+      stopTaskPolling();
+      
+      // 停止所有任务并重置状态
+      try {
+        console.log('Agent模式已关闭，停止所有任务并重置状态');
+        const stopResponse = await fetch('/api/agent/admin/control', {
+          method: 'POST', 
+          headers: {'Content-Type': 'application/json'}, 
+          body: JSON.stringify({action: 'end_all'})
+        });
+        
+        if (stopResponse.ok) {
+          const stopResult = await stopResponse.json();
+          console.log('任务停止结果:', stopResult);
+        } else {
+          console.warn('停止任务失败:', stopResponse.status);
+        }
+        
+        // 设置Agent标志为关闭
+        await fetch('/api/agent/flags', {
+          method: 'POST', 
+          headers: {'Content-Type': 'application/json'}, 
+          body: JSON.stringify({
+            ee_name: getEEName(),
+            lanlan_name: getEEName(), 
+            flags: {agent_enabled:false, computer_use_enabled:false, mcp_enabled:false}
+          })
+        });
+        
+      } catch(e) {
+        console.warn('关闭Agent时出错:', e);
+      }
+    }
+  });
+
+  async function checkCapability(kind) {
+    try {
+      if (kind === 'computer_use') {
+        const r = await fetch(`/api/agent/computer_use/availability`);
+        if (!r.ok) return false;
+        const j = await r.json();
+        if (!j.ready) {
+          setStatus((j.reasons && j.reasons[0]) || '键鼠控制不可用');
+          return false;
+        }
+        return true;
+      } else if (kind === 'mcp') {
+        const r = await fetch(`/api/agent/mcp/availability`);
+        if (!r.ok) return false;
+        const j = await r.json();
+        if (!j.ready) {
+          setStatus((j.reasons && j.reasons[0]) || 'MCP不可用');
+          return false;
+        }
+        return true;
+      }
+      return false;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  cuToggle.addEventListener('change', async () => {
+    if (cuToggle.checked) {
+      try {
+        const ok = await checkCapability('computer_use');
+        if (!ok) throw new Error('not available');
+      } catch (e) {
+        setStatus('键鼠控制不可用，请检查智谱API秘钥配置');
+        cuToggle.checked = false;
+        return;
+      }
+      try {
+        const r = await fetch('/api/agent/flags', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ee_name: getEEName(), lanlan_name: getEEName(), flags: {computer_use_enabled:true}})});
+        if (!r.ok) throw new Error('main_server rejected');
+        setStatus('键鼠控制已开启');
+      } catch(e) {
+        cuToggle.checked = false;
+        setStatus('键鼠控制开启失败');
+      }
+    } else {
+      setStatus('键鼠控制已关闭');
+      try { await fetch('/api/agent/flags', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ee_name: getEEName(), lanlan_name: getEEName(), flags: {computer_use_enabled:false}})});} catch(e){}
+    }
+  });
+
+  mcpToggle.addEventListener('change', async () => {
+    if (mcpToggle.checked) {
+      try {
+        const ok = await checkCapability('mcp');
+        if (!ok) throw new Error('not available');
+      } catch (e) {
+        setStatus('MCP插件不可用，请检查MCP服务器配置');
+        mcpToggle.checked = false;
+        return;
+      }
+      try {
+        const r = await fetch('/api/agent/flags', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ee_name: getEEName(), lanlan_name: getEEName(), flags: {mcp_enabled:true}})});
+        if (!r.ok) throw new Error('main_server rejected');
+        setStatus('MCP插件已开启');
+      } catch(e) {
+        mcpToggle.checked = false;
+        setStatus('MCP开启失败');
+      }
+    } else {
+      setStatus('MCP插件已关闭');
+      try { await fetch('/api/agent/flags', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ee_name: getEEName(), lanlan_name: getEEName(), flags: {mcp_enabled:false}})});} catch(e){}
+    }
+  });
+  
+  // Add event listeners
+  agentCollapseBtn.addEventListener('click', toggleAgentPanel);
+  
+  // Initialize task progress display state
+  if (masterToggle.checked) {
+    // Expand master control row
+    const masterControlRow = document.querySelector('.master-control-row');
+    masterControlRow.classList.add('expanded');
+    
+    // Show sub controls row
+    const subControlsRow = document.getElementById('sub-controls-row');
+    subControlsRow.classList.add('show');
+    
+    taskProgressEl.classList.add('show');
+    console.log('页面加载时Agent模式已开启，启动持续轮询');
+    // 页面加载时如果Agent模式已开启，立即启动持续轮询
+    startTaskPolling();
+  } else {
+    // Ensure master control row is collapsed on page load if master is off
+    const masterControlRow = document.querySelector('.master-control-row');
+    masterControlRow.classList.remove('expanded');
+    
+    // Ensure sub controls are hidden on page load if master is off
+    const subControlsRow = document.getElementById('sub-controls-row');
+    subControlsRow.classList.remove('show');
+  }
+</script>
+</body>
+</html>

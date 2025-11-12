@@ -1,0 +1,57 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "xiao8"
+version = "0.1.0"
+description = "Xiao8 application"
+readme = "README.MD"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+  "fastapi~=0.115.9",
+  "websockets~=15.0.1",
+  "inflect~=7.3.1",
+  "librosa~=0.10.2",
+  "numpy~=1.26.4",
+  "pyaudio~=0.2.14",
+  "websocket-client~=1.8.0",
+  "langchain",
+  "langchain-openai",
+  "langchain_community",
+  "jinja2",
+  "dashscope",
+  "python-multipart",
+  "pillow",
+  "pyautogui",
+  "gui-agents",
+]
+
+
+[tool.hatch.build.targets.wheel]
+packages = [
+  "brain",
+  "config",
+  "main_helper",
+  "memory",
+  "utils",
+]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "brain",
+  "config",
+  "main_helper",
+  "memory",
+  "utils",
+  "static",
+  "templates",
+  "assets",
+  "main_server.py",
+  "memory_server.py",
+  "tool_server.py",
+  "monitor.py",
+  "README.MD",
+  "LICENSE",
+]
+

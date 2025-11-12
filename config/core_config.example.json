@@ -1,0 +1,8 @@
+{
+  "coreApiKey": "",
+  "coreApi": "qwen",
+  "assistApi": "qwen",
+  "assistApiKeyQwen": "",
+  "assistApiKeyOpenai": "",
+  "assistApiKeyGlm": ""
+}

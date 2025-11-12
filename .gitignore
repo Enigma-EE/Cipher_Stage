@@ -1,0 +1,43 @@
+# 忽略敏感配置
+core_config.txt
+
+# 忽略日志文件
+*.log
+
+# 忽略 memory/store 下所有内容（含子目录和文件）
+memory/store/
+config/api.py
+config/*.json
+!config/core_config.example.json
+
+# 忽略临时文件
+*.tmp
+
+# 忽略 Python 缓存文件和字节码
+__pycache__/
+*.py[cod]
+
+# 忽略 Jupyter Notebook 检查点
+.ipynb_checkpoints/
+.vscode/
+.idea/
+.pytest_cache/
+.DS_Store
+.venv/
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+ 
+# 忽略项目自带的独立虚拟环境目录（避免提交巨大依赖与解释器）
+env/
+
+# 忽略上游打包的可执行与运行时资源（避免>100MB推送失败）
+upstream/
+
+# 忽略本地可执行/二进制产物（发布用 Release 附件）
+*.exe
+*.dll
+*.pak
+*.bin

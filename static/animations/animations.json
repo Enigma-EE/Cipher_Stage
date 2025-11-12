@@ -1,0 +1,98 @@
+{
+  "animations": [
+    {
+      "name": "Standing Idle",
+      "file": "/static/animations/StandingIdle.vrma",
+      "defaultSpeed": 1.0,
+      "tags": ["idle", "standing", "full_body"],
+      "durationHint": 3.0,
+      "type": "vrma"
+    },
+    {
+      "name": "Having A Meeting, Female",
+      "file": "/static/animations/HavingAMeetingFemale.vrma",
+      "defaultSpeed": 1.0,
+      "tags": ["gesture", "meeting", "upper_body"],
+      "durationHint": 5.0,
+      "type": "vrma"
+    },
+    {
+      "name": "Sitting Laughing",
+      "file": "/static/animations/sittinglaughing.vrma",
+      "defaultSpeed": 1.0,
+      "tags": ["talk", "upper_body"],
+      "durationHint": 4.0,
+      "type": "vrma"
+    },
+    {
+      "name": "Sitting Thumbs Up",
+      "file": "/static/animations/sittingThumbsUp.vrma",
+      "defaultSpeed": 1.0,
+      "tags": ["gesture", "upper_body"],
+      "durationHint": 3.0,
+      "type": "vrma"
+    },
+    {
+      "name": "Clapping",
+      "file": "/static/animations/clapping.vrma",
+      "defaultSpeed": 1.0,
+      "tags": ["gesture", "upper_body"],
+      "durationHint": 2.5,
+      "type": "vrma"
+    },
+    {
+      "name": "Excited",
+      "file": "/static/animations/excited.vrma",
+      "defaultSpeed": 1.0,
+      "tags": ["emotion", "upper_body"],
+      "durationHint": 3.0,
+      "type": "vrma"
+    },
+    {
+      "name": "Surprised",
+      "file": "/static/animations/Surprised.vrma",
+      "defaultSpeed": 1.0,
+      "tags": ["emotion", "upper_body"],
+      "durationHint": 2.5,
+      "type": "vrma"
+    },
+    {
+      "name": "Headbutt",
+      "file": "/static/animations/headbutt.vrma",
+      "defaultSpeed": 1.0,
+      "tags": ["pose", "upper_body"],
+      "durationHint": 2.5,
+      "type": "vrma"
+    },
+    {
+      "name": "Zombie Neck Bite",
+      "file": "/static/animations/ZombieNeckBite.vrma",
+      "defaultSpeed": 1.0,
+      "tags": ["pose", "upper_body"],
+      "durationHint": 3.0,
+      "type": "vrma"
+    },
+    {
+      "name": "Thankful",
+      "file": "/static/animations/thankful.vrma",
+      "defaultSpeed": 1.0,
+      "tags": ["gesture", "upper_body"],
+      "durationHint": 2.5,
+      "type": "vrma"
+    }
+  ],
+  "actionMap": {
+    "idle": "Standing Idle",
+    "talk": "Sitting Laughing",
+    "twist": "Standing Idle"
+  },
+  "exportSettings": {
+    "unityExportNotes": "推荐使用 VRM Animation (.vrma) 作为动作资源，文件放入 static/animations/ 并在清单中以相对URL（/static/animations/.../*.vrma）引用。",
+    "supportedFormats": ["vrma", "glb"],
+    "recommendedSettings": {
+      "fps": 30,
+      "compression": true,
+      "embedTextures": false
+    }
+  }
+}

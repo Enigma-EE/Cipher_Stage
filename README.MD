@@ -4,7 +4,7 @@
 
 ## English
 
-Cipher Stage targets independent Vtuber scenarios. 
+Based on `wehos/N.E.K.O` (MIT) Link: https://github.com/wehos/N.E.K.O , adapted and expanded for independent VTuber live scenarios.
 
 - Project scope: dual-stack Live2D/3D live interaction system (lip-sync, TTS, memory & semantic retrieval)
 - License: MIT (upstream copyrights and attribution preserved)
@@ -88,11 +88,17 @@ Upstream remains Live2D-first for structure and demos. This repo expands 3D capa
 └── tools/                   # asset/model conversion tools
 ```
 
-### Upstream & Credits
-- Built upon upstream project: `Xiao8` (MIT)
-- Thanks: three-vrm, Live2D, LangChain, NVIDIA NeMo TTS
+### Origins & Attribution / Upstream & Credits
 
-New 3D-related assets and scripts come from official/community projects.
+- Built upon upstream project: `wehos/N.E.K.O` (MIT)
+- Link: https://github.com/wehos/N.E.K.O
+- Code reuse & adaptations: portions are adapted under the MIT license with attribution preserved; sources are noted in file headers or in `NOTICE.md`.
+- Differences from upstream: stronger focus on VTuber live scenarios and real-time interaction (viseme timeline, expression mapping, live pipeline), expanded 3D rendering and animation path, and adjusted directory/config layout.
+- Credits: three-vrm, Live2D, LangChain, NVIDIA NeMo TTS and the open-source community.
+- 3D-related assets and scripts: sourced from official/community projects and used under their respective licenses/terms.
+- See `NOTICE.md` for detailed attributions and license references.
+
+ 
 
 ### License
 MIT license. You may use, modify, and distribute the code and binaries, preserving copyright and license notices. If you include third-party code/models, ensure license compatibility and add notices in `NOTICE.md` or the “Credits & Sources” section.
@@ -113,6 +119,8 @@ MIT license. You may use, modify, and distribute the code and binaries, preservi
 ---
 
 ## 简体中文
+
+本仓库基于 `wehos/N.E.K.O` （MIT）https://github.com/wehos/N.E.K.O 改写与扩展。
 
 面向独立 Vtuber 场景, 在保持低延迟与稳定直播管线的同时，强化 3D 模型渲染、动画播放与口型时间轴驱动。
 
@@ -210,24 +218,23 @@ MIT license. You may use, modify, and distribute the code and binaries, preservi
 └── tools/                   # 素材/模型转换工具
 ```
 
-## 上游与致谢
+## 来源与致谢 / 上游与署名
 
 - 上游仓库：`wehos/N.E.K.O`（MIT）
 - 链接：https://github.com/wehos/N.E.K.O
 
-## 上游与 Fork 说明
-- Fork 目的与差异：
-  - 更强调 VTuber 内容与实时互动体验（嘴型驱动、表情映射、直播链路优化）。
+- 代码来源与改写：在 MIT 许可下重用并改写了上游部分模块与脚本，保留原版权与署名；相关来源在文件头或 `NOTICE.md` 中注明。
+- 与上游的差异点：更强调 VTuber 场景与实时互动体验（嘴型时间轴、表情映射、直播链路优化），新增 3D 渲染与动画链路，目录结构与配置有所调整。
+- 致谢：three-vrm、Live2D、LangChain、NVIDIA NeMo TTS 等开源项目与社区。
+- 3D 相关资源与脚本：来自官方/社区项目，遵循各自许可证与授权范围。
 
-- 感谢以下开源项目与社区：three-vrm、Live2D、LangChain, NVIDIA NeMo TTS等
-
-新增 3D 相关资源与脚本来自官方/社区项目。
+- 详见 `NOTICE.md` 获取来源与许可证参考。
 
 ## 许可协议（License）
 
-本项目采用 MIT 许可证。你可以自由使用、修改与分发本项目的代码与二进制，但需保留版权与许可声明。若引入第三方代码/模型，请确认其许可证兼容性，并在 `NOTICE.md`（或 README 的“致谢与来源”）中补充说明。
+本项目采用 MIT 许可证。你可以自由使用、修改与分发本项目的代码与二进制，但需保留版权与许可声明。若引入第三方代码/模型，请确认其许可证兼容性。
 
-## 安全与合规（重要）
+## 安全与合规
 
 - 请勿在仓库中提交任何真实密钥或私有数据；使用示例文件初始化配置
 - 如误提交，请立即吊销/轮换密钥；并从仓库历史中移除（如需，参照 Git 文档）

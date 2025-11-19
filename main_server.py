@@ -16,18 +16,30 @@ from fastapi.staticfiles import StaticFiles
 from main_helper import core as core, cross_server as cross_server
 from fastapi.templating import Jinja2Templates
 from fastapi.responses import HTMLResponse, JSONResponse
-from utils.preferences import load_user_preferences, update_model_preferences, validate_model_preferences, move_model_to_top
+from fastapi.responses import Response
+from main_helper.asr_funasr_plugin import LocalASR
+from utils.tts_local import synthesize as local_tts_synthesize, TTSLocalError
+from utils.preferences import load_user_preferences, update_model_preferences, validate_model_preferences, move_model_to_top, update_preferences_generic
 from utils.frontend_utils import find_models
+from utils.hardware import get_cpu_info, get_gpu_info, get_memory_info
 from multiprocessing import Process, Queue, Event
 import atexit
-import dashscope
-from dashscope.audio.tts_v2 import VoiceEnrollmentService
+# Make dashscope optional at import time
+try:
+    import dashscope
+    from dashscope.audio.tts_v2 import VoiceEnrollmentService
+    DASHSCOPE_AVAILABLE = True
+except Exception:
+    dashscope = None
+    VoiceEnrollmentService = None
+    DASHSCOPE_AVAILABLE = False
 import requests
 import subprocess
 import httpx
 import pathlib, wave
 from openai import AsyncOpenAI
 from config import get_character_data, MAIN_SERVER_PORT, CORE_API_KEY, AUDIO_API_KEY, EMOTION_MODEL, OPENROUTER_API_KEY, OPENROUTER_URL, load_characters, save_characters, TOOL_SERVER_PORT, MONITOR_SERVER_PORT
+from utils.model_path import normalize_vrm_path, validate_character_config
 from config.prompts_sys import emotion_analysis_prompt
 import glob
 
@@ -66,13 +78,23 @@ sync_process = {}
 # Unpack character data once for initialization
 master_name, her_name, master_basic_config, lanlan_basic_config, name_mapping, lanlan_prompt, semantic_store, time_store, setting_store, recent_log = get_character_data()
 catgirl_names = list(lanlan_prompt.keys())
+# 角色配置校验（仅日志提示，不阻塞启动）
+try:
+    _characters = load_characters()
+    _warnings = validate_character_config(_characters, static_dir='static')
+    for _w in _warnings:
+        logger.warning(_w)
+except Exception as _e:
+    logger.warning(f"角色配置校验失败: {_e}")
 for k in catgirl_names:
     sync_message_queue[k] = Queue()
     sync_shutdown_event[k] = Event()
+    # 使用角色“昵称”替换 {LANLAN_NAME}，若未配置则回退为角色名
+    nickname = lanlan_basic_config.get(k, {}).get('昵称', k)
     session_manager[k] = core.LLMSessionManager(
         sync_message_queue[k],
         k,
-        lanlan_prompt[k].replace('{LANLAN_NAME}', k).replace('{MASTER_NAME}', master_name)
+        lanlan_prompt[k].replace('{LANLAN_NAME}', nickname).replace('{MASTER_NAME}', master_name)
     )
     session_id[k] = None
     sync_process[k] = None
@@ -80,6 +102,15 @@ lock = asyncio.Lock()
 
 # --- FastAPI App Setup ---
 app = FastAPI()
+
+# 离线ASR插件（参考实现+自研接口骨架）
+local_asr = LocalASR(
+    model_dir=os.path.join('upstream', 'ai_virtual_mate_web', 'data', 'model'),
+    backend="auto",
+    whisper_model=os.environ.get('EE_ASR_WHISPER_MODEL', 'small'),
+    use_gpu=None
+)
+
 
 class CustomStaticFiles(StaticFiles):
     async def get_response(self, path, scope):
@@ -107,7 +138,12 @@ def get_start_config():
     return {
         "browser_mode_enabled": False,
         "browser_page": "chara_manager",
-        'server': None
+        'server': None,
+        # 默认禁用通过页面关闭触发的服务器关机
+        'allow_beacon_shutdown': False,
+        # 新增：禁用记忆服务器与同步连接器的开关（便于排障）
+        'disable_memory_server': False,
+        'disable_sync_connectors': False,
     }
 
 def set_start_config(config):
@@ -146,16 +182,20 @@ def find_model_config_file(model_name: str) -> str:
 async def get_default_index(request: Request):
     # 每次动态获取角色数据
     _, her_name, _, lanlan_basic_config, _, _, _, _, _, _ = get_character_data()
-    # 获取live2d字段
+    # 获取live2d/vrm字段
     live2d = lanlan_basic_config.get(her_name, {}).get('live2d', 'mao_pro')
+    vrm_model = lanlan_basic_config.get(her_name, {}).get('vrm_model', 'EE.vrm')
     # 查找所有模型
     models = find_models()
     # 根据live2d字段查找对应的model path
     model_path = next((m["path"] for m in models if m["name"] == live2d), find_model_config_file(live2d))
+    # 规范化 VRM 路径（允许直接配置文件名或 /static 前缀）
+    vrm_model_path = normalize_vrm_path(vrm_model)
     return templates.TemplateResponse("templates/index.html", {
         "request": request,
         "ee_name": her_name,
         "model_path": model_path,
+        "vrm_model_path": vrm_model_path,
         "focus_mode": False
     })
 
@@ -168,18 +208,136 @@ async def get_default_index_alias(request: Request):
 async def get_default_focus_index(request: Request):
     # 每次动态获取角色数据
     _, her_name, _, lanlan_basic_config, _, _, _, _, _, _ = get_character_data()
-    # 获取live2d字段
+    # 获取live2d/vrm字段
     live2d = lanlan_basic_config.get(her_name, {}).get('live2d', 'mao_pro')
+    vrm_model = lanlan_basic_config.get(her_name, {}).get('vrm_model', 'EE.vrm')
     # 查找所有模型
     models = find_models()
     # 根据live2d字段查找对应的model path
     model_path = next((m["path"] for m in models if m["name"] == live2d), find_model_config_file(live2d))
+    # 规范化 VRM 路径（允许直接配置文件名或 /static 前缀）
+    vrm_model_path = normalize_vrm_path(vrm_model)
     return templates.TemplateResponse("templates/index.html", {
         "request": request,
         "ee_name": her_name,
         "model_path": model_path,
+        "vrm_model_path": vrm_model_path,
         "focus_mode": True
     })
+
+@app.get('/api/system/hardware')
+async def api_system_hardware():
+    """返回当前主机的硬件信息（CPU/GPU/内存）。"""
+    try:
+        return {
+            "success": True,
+            "cpu": get_cpu_info(),
+            "gpu": get_gpu_info(),
+            "memory": get_memory_info(),
+        }
+    except Exception as e:
+        logger.error(f"硬件信息获取失败: {e}")
+        return {"success": False, "error": str(e)}
+
+@app.get('/asr_test', response_class=HTMLResponse)
+async def asr_test_page(request: Request):
+    """简易本地ASR上传测试页。"""
+    return templates.TemplateResponse("templates/asr_test.html", {"request": request})
+
+@app.post('/api/asr/local')
+async def asr_local_endpoint(
+    file: UploadFile = File(None),
+    audio_base64: str = Form(None),
+    sample_rate: int = Form(16000),
+    backend: str = Form('auto'),
+    whisper_model: str = Form('small.en'),
+    use_gpu: str = Form('auto'),  # 'auto'|'true'|'false'
+    language: str = Form('en'),
+    size: str = Form(None)
+):
+    """离线ASR接口骨架：接受WAV文件或base64编码音频，返回占位识别结果。
+
+    - 不依赖上游源代码，仅参考其模块功能目标，采用自研接口避免GPL传染。
+    - 后续可在 main_helper/asr_funasr_plugin.py 内实现 FunASR ONNX 推理。
+    """
+    try:
+        wav_bytes = None
+        if file is not None:
+            wav_bytes = await file.read()
+        elif audio_base64:
+            import base64
+            try:
+                wav_bytes = base64.b64decode(audio_base64)
+            except Exception:
+                return JSONResponse({"success": False, "error": "audio_base64 解码失败"})
+        else:
+            return JSONResponse({"success": False, "error": "未提供音频"})
+
+        # 根据请求参数调整后端
+        local_asr.backend = backend or 'auto'
+        # 兼容参数：如果提供了 size，则优先使用 size；否则使用 whisper_model
+        local_asr.whisper_model = (size or whisper_model or local_asr.whisper_model)
+        if use_gpu in ('true', 'false'):
+            local_asr.use_gpu = (use_gpu == 'true')
+        else:
+            local_asr.use_gpu = None
+        # 语言锁定，避免自动语言检测带来的波动
+        local_asr.lang = language or local_asr.lang
+
+        # 执行识别
+        result = local_asr.transcribe_from_wav_bytes(wav_bytes, sample_rate=sample_rate)
+        return {"success": True, "result": result}
+    except Exception as e:
+        logger.error(f"ASR识别失败: {e}")
+        return JSONResponse({"success": False, "error": str(e)})
+
+@app.post('/api/tts/local')
+async def tts_local_endpoint(
+    text: str = Form(...),
+    provider: str = Form('pyttsx3'),
+    voice: str = Form(None),
+    language: str = Form('en'),
+    sample_rate: int = Form(24000),
+    fmt: str = Form('wav'),
+    service_url: str = Form(None),
+    return_base64: str = Form('false'),  # 'true'|'false'
+):
+    """离线TTS接口：接受文本，返回音频。支持pyttsx3与HTTP代理服务。
+
+    - provider='pyttsx3' 无需模型即可离线合成（系统TTS）。
+    - provider='http'|'cosyvoice'|'xtts'|'chattts' 通过 `service_url` 调本地服务。
+    - return_base64='true' 时返回JSON的base64，否则返回音频字节（audio/wav|audio/mpeg）。
+    """
+    try:
+        # 统一模型目录，和ASR放在同一个父目录下（data/）
+        tts_model_dir = os.path.join('upstream', 'ai_virtual_mate_web', 'data', 'tts_model')
+        try:
+            os.makedirs(tts_model_dir, exist_ok=True)
+        except Exception:
+            pass
+
+        audio_bytes, mime = local_tts_synthesize(
+            text=text,
+            provider=provider,
+            voice=voice,
+            language=language,
+            sample_rate=sample_rate,
+            fmt=fmt,
+            model_dir=tts_model_dir,
+            service_url=service_url,
+        )
+        if return_base64.lower() == 'true':
+            import base64
+            b64 = base64.b64encode(audio_bytes).decode('utf-8')
+            return {"success": True, "audio_base64": b64, "mime": mime, "sample_rate": sample_rate}
+        else:
+            return Response(content=audio_bytes, media_type=mime)
+    except TTSLocalError as e:
+        logger.error(f"TTS合成失败: {e}")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=400)
+    except Exception as e:
+        logger.error(f"TTS接口异常: {e}")
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
 
 @app.get("/api/preferences")
 async def get_preferences():
@@ -199,8 +357,8 @@ async def save_preferences(request: Request):
         if not validate_model_preferences(data):
             return {"success": False, "error": "偏好数据格式无效"}
         
-        # 更新偏好
-        if update_model_preferences(data['model_path'], data['position'], data['scale']):
+        # 更新偏好（新版支持扩展字段，旧版仍兼容）
+        if update_preferences_generic(data):
             return {"success": True, "message": "偏好设置已保存"}
         else:
             return {"success": False, "error": "保存失败"}
@@ -332,23 +490,28 @@ async def startup_event():
     global sync_process
     logger.info("Starting sync connector processes")
     # 启动同步连接器进程
-    for k in sync_process:
-        if sync_process[k] is None:
-            sync_process[k] = Process(
-                target=cross_server.sync_connector_process,
-                args=(sync_message_queue[k], sync_shutdown_event[k], k, f"ws://localhost:{MONITOR_SERVER_PORT}", {'bullet': False, 'monitor': True})
-            )
-            sync_process[k].start()
-            logger.info(f"同步连接器进程已启动 (PID: {sync_process[k].pid})")
+    start_cfg = get_start_config()
+    if not start_cfg.get('disable_sync_connectors', False):
+        for k in sync_process:
+            if sync_process[k] is None:
+                sync_process[k] = Process(
+                    target=cross_server.sync_connector_process,
+                    args=(sync_message_queue[k], sync_shutdown_event[k], k, f"ws://localhost:{MONITOR_SERVER_PORT}", {'bullet': False, 'monitor': True})
+                )
+                sync_process[k].start()
+                logger.info(f"同步连接器进程已启动 (PID: {sync_process[k].pid})")
+    else:
+        logger.info("已禁用同步连接器，跳过启动。")
 
-    # 自启动 memory_server：若未就绪则尝试拉起并等待就绪
+    # 自启动 memory_server：若未就绪则尝试拉起并等待就绪（可禁用）
     try:
         from config import MEMORY_SERVER_PORT
         import httpx
 
         async def ensure_memory_server_ready() -> bool:
             try:
-                async with httpx.AsyncClient(timeout=1.0) as client:
+                # 禁用环境代理，避免本地 127.0.0.1 请求被系统/公司代理劫持导致 502
+                async with httpx.AsyncClient(timeout=1.0, trust_env=False) as client:
                     r = await client.get(f"http://127.0.0.1:{MEMORY_SERVER_PORT}/new_dialog/{her_name}")
                     if r.is_success:
                         logger.info("memory_server 已就绪")
@@ -358,27 +521,39 @@ async def startup_event():
 
             try:
                 ms_path = os.path.join(os.path.dirname(__file__), "memory_server.py")
-                proc = subprocess.Popen([sys.executable, ms_path, "--enable-shutdown"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                # 不吞日志：继承父进程的 stdout/stderr，便于在控制台直接查看原因
+                launch_cmd = [sys.executable, ms_path, "--enable-shutdown"]
+                logger.info(f"即将启动 memory_server：{' '.join(launch_cmd)} (端口: {MEMORY_SERVER_PORT})")
+                proc = subprocess.Popen(launch_cmd, stdout=None, stderr=None)
                 logger.info(f"已拉起 memory_server (PID: {proc.pid})，等待就绪...")
-                # 轮询等待端口就绪
-                for _ in range(20):  # 最多等待约4秒
+
+                # 轮询等待端口就绪（最长约10秒），并在每次失败时记录一次简要原因
+                for i in range(50):  # 50 * 0.2s = 10秒
                     await asyncio.sleep(0.2)
                     try:
-                        async with httpx.AsyncClient(timeout=0.6) as client:
+                        # 禁用环境代理，确保直连本地端口
+                        async with httpx.AsyncClient(timeout=0.8, trust_env=False) as client:
                             r = await client.get(f"http://127.0.0.1:{MEMORY_SERVER_PORT}/new_dialog/{her_name}")
                             if r.is_success:
                                 logger.info("memory_server 就绪")
                                 return True
-                    except Exception:
-                        continue
-                logger.warning("memory_server 自启动后仍未就绪")
+                            else:
+                                logger.warning(f"memory_server 响应非成功状态: {r.status_code}")
+                    except Exception as e:
+                        if i % 5 == 0:
+                            logger.warning(f"memory_server 仍未就绪 (尝试 {i+1}/50)：{e}")
+
+                logger.error("memory_server 自启动后仍未就绪：请检查依赖安装、API Key 配置或端口占用。")
             except Exception as e:
                 logger.error(f"自启动 memory_server 失败: {e}")
             return False
 
-        ready = await ensure_memory_server_ready()
-        if not ready:
-            logger.warning("memory_server 未就绪，部分会话初始化可能失败")
+        if not start_cfg.get('disable_memory_server', False):
+            ready = await ensure_memory_server_ready()
+            if not ready:
+                logger.warning("memory_server 未就绪，部分会话初始化可能失败")
+        else:
+            logger.info("已禁用记忆服务器，跳过就绪检查与自启动。")
     except Exception as e:
         logger.warning(f"检测/拉起 memory_server 过程出错: {e}")
 
@@ -433,6 +608,102 @@ async def shutdown_event():
         logger.warning(f"向memory_server发送关闭信号时出错: {e}")
 
 
+# 管理接口：禁用/启用记忆服务器、清理缓存、软重启
+@app.post('/api/admin/memory/disable')
+async def api_admin_disable_memory():
+    cfg = get_start_config()
+    cfg['disable_memory_server'] = True
+    set_start_config(cfg)
+    return {"success": True, "disable_memory_server": True}
+
+
+@app.post('/api/admin/memory/enable')
+async def api_admin_enable_memory():
+    cfg = get_start_config()
+    cfg['disable_memory_server'] = False
+    set_start_config(cfg)
+    return {"success": True, "disable_memory_server": False}
+
+
+@app.post('/api/admin/sync/disable')
+async def api_admin_disable_sync():
+    cfg = get_start_config()
+    cfg['disable_sync_connectors'] = True
+    set_start_config(cfg)
+    return {"success": True, "disable_sync_connectors": True}
+
+
+@app.post('/api/admin/sync/enable')
+async def api_admin_enable_sync():
+    cfg = get_start_config()
+    cfg['disable_sync_connectors'] = False
+    set_start_config(cfg)
+    return {"success": True, "disable_sync_connectors": False}
+
+
+@app.post('/api/admin/cache/flush')
+async def api_admin_flush_cache():
+    """清理 memory/store 下的缓存文件（recent/setting/semantic/time-index）。"""
+    import glob, os
+    try:
+        store_dir = os.path.join(os.path.dirname(__file__), 'memory', 'store')
+        os.makedirs(store_dir, exist_ok=True)
+        patterns = [
+            os.path.join(store_dir, 'recent_*.json'),
+            os.path.join(store_dir, 'settings_*.json'),
+            os.path.join(store_dir, 'semantic_memory_*'),
+            os.path.join(store_dir, 'time_indexed_*'),
+        ]
+        removed = []
+        for p in patterns:
+            for f in glob.glob(p):
+                try:
+                    if os.path.isdir(f):
+                        # 目录：尝试删除目录内文件
+                        for root, dirs, files in os.walk(f, topdown=False):
+                            for name in files:
+                                os.remove(os.path.join(root, name))
+                            for name in dirs:
+                                os.rmdir(os.path.join(root, name))
+                        os.rmdir(f)
+                    else:
+                        os.remove(f)
+                    removed.append(os.path.basename(f))
+                except Exception as e:
+                    logger.warning(f"删除 {f} 失败: {e}")
+        return {"success": True, "removed": removed}
+    except Exception as e:
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
+@app.post('/api/admin/restart')
+async def api_admin_restart():
+    """触发软重启：优雅关闭同步进程与记忆服务器，并请求主服务退出。"""
+    try:
+        # 关闭同步进程
+        for k in sync_process:
+            if sync_process[k] is not None:
+                sync_shutdown_event[k].set()
+                sync_process[k].join(timeout=3)
+                if sync_process[k].is_alive():
+                    sync_process[k].terminate()
+        # 关闭记忆服务器
+        try:
+            import requests
+            from config import MEMORY_SERVER_PORT
+            shutdown_url = f"http://localhost:{MEMORY_SERVER_PORT}/shutdown"
+            requests.post(shutdown_url, timeout=1)
+        except Exception:
+            pass
+        # 请求主服务退出
+        cfg = get_start_config()
+        if cfg.get('server') is not None:
+            cfg['server'].should_exit = True
+        return {"success": True, "message": "服务已请求退出，请重新启动。"}
+    except Exception as e:
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
+
+
 @app.websocket("/ws/{ee_name}")
 async def websocket_endpoint(websocket: WebSocket, ee_name: str):
     await websocket.accept()
@@ -482,6 +753,13 @@ async def websocket_endpoint(websocket: WebSocket, ee_name: str):
             if action == "start_session":
                 session_manager[resolved_name].active_session_is_idle = False
                 input_type = message.get("input_type")
+                # 调试日志：确认会话名与内存服务端口
+                try:
+                    logger.info(
+                        f"准备启动会话: resolved={resolved_name}, manager.lanlan_name={getattr(session_manager[resolved_name], 'lanlan_name', None)}, memory_port={getattr(session_manager[resolved_name], 'memory_server_port', None)}"
+                    )
+                except Exception:
+                    pass
                 if input_type in ['audio', 'screen', 'camera']:
                     asyncio.create_task(session_manager[resolved_name].start_session(websocket, message.get("new_session", False)))
                 else:
@@ -520,6 +798,21 @@ async def websocket_endpoint(websocket: WebSocket, ee_name: str):
 async def websocket_endpoint_default(websocket: WebSocket):
     # 复用主处理函数逻辑，避免重复代码
     await websocket_endpoint(websocket, ee_name=her_name)
+
+@app.get('/api/debug/state')
+async def debug_state():
+    """调试端点：查看当前默认角色、可用角色以及会话管理器的实际名称映射。"""
+    try:
+        keys = list(session_manager.keys())
+        names = {k: getattr(session_manager[k], 'lanlan_name', None) for k in keys}
+        return {
+            "her_name": her_name,
+            "catgirl_names": catgirl_names,
+            "session_manager_keys": keys,
+            "session_manager_names": names
+        }
+    except Exception as e:
+        return JSONResponse({"success": False, "error": str(e)}, status_code=500)
 
 @app.post('/api/unity/send')
 async def unity_send(request: Request):
@@ -951,6 +1244,8 @@ async def voice_clone(file: UploadFile = File(...), prefix: str = Form(...)):
             else:
                 tmp_url = page_url  # 兜底
         # 2. 用直链注册音色
+        if not DASHSCOPE_AVAILABLE:
+            return JSONResponse({'error': 'dashscope 未安装或不可用，无法进行声音注册', 'file_url': tmp_url}, status_code=500)
         dashscope.api_key = AUDIO_API_KEY
         service = VoiceEnrollmentService()
         target_model = "cosyvoice-v2"
@@ -984,12 +1279,15 @@ async def beacon_shutdown():
     try:
         # 从 app.state 获取配置
         current_config = get_start_config()
-        # Only respond to beacon if server was started with --open-browser
-        if current_config['browser_mode_enabled']:
+        # 仅在明确允许时才响应页面关闭 Beacon
+        if current_config['browser_mode_enabled'] and current_config.get('allow_beacon_shutdown', False):
             logger.info("收到beacon信号，准备关闭服务器...")
             # Schedule server shutdown
             asyncio.create_task(shutdown_server_async())
             return {"success": True, "message": "服务器关闭信号已接收"}
+        else:
+            logger.info("忽略浏览器关闭信号（自动关机已禁用）")
+            return {"success": True, "message": "自动关机已禁用"}
     except Exception as e:
         logger.error(f"Beacon处理错误: {e}")
         return {"success": False, "error": str(e)}
@@ -1065,8 +1363,13 @@ async def unregister_voice(name: str):
 
 @app.get('/api/memory/recent_files')
 async def get_recent_files():
-    """获取 memory/store 下所有 recent*.json 文件名列表"""
-    files = glob.glob('memory/store/recent*.json')
+    """获取 memory/store 下所有 recent*.json 文件名列表（绝对路径）"""
+    base_store_dir = os.path.join(os.path.dirname(__file__), 'memory', 'store')
+    try:
+        os.makedirs(base_store_dir, exist_ok=True)
+    except Exception:
+        pass
+    files = glob.glob(os.path.join(base_store_dir, 'recent*.json'))
     file_names = [os.path.basename(f) for f in files]
     return {"files": file_names}
 
@@ -1117,8 +1420,9 @@ async def update_review_config(request: Request):
 
 @app.get('/api/memory/recent_file')
 async def get_recent_file(filename: str):
-    """获取指定 recent*.json 文件内容"""
-    file_path = os.path.join('memory/store', filename)
+    """获取指定 recent*.json 文件内容（绝对路径）"""
+    base_store_dir = os.path.join(os.path.dirname(__file__), 'memory', 'store')
+    file_path = os.path.join(base_store_dir, filename)
     if not (filename.startswith('recent') and filename.endswith('.json')):
         return JSONResponse({"success": False, "error": "文件名不合法"}, status_code=400)
     if not os.path.exists(file_path):
@@ -1437,7 +1741,12 @@ async def save_recent_file(request: Request):
     data = await request.json()
     filename = data.get('filename')
     chat = data.get('chat')
-    file_path = os.path.join('memory/store', filename)
+    base_store_dir = os.path.join(os.path.dirname(__file__), 'memory', 'store')
+    try:
+        os.makedirs(base_store_dir, exist_ok=True)
+    except Exception:
+        pass
+    file_path = os.path.join(base_store_dir, filename)
     if not (filename and filename.startswith('recent') and filename.endswith('.json')):
         return JSONResponse({"success": False, "error": "文件名不合法"}, status_code=400)
     arr = []
@@ -1549,35 +1858,47 @@ async def memory_browser(request: Request):
 
 @app.get("/focus/{ee_name}", response_class=HTMLResponse)
 async def get_focus_index(request: Request, ee_name: str):
+    # 对非法角色名进行回退，确保页面不会误用未配置的名称
+    resolved = ee_name if ee_name in session_manager else her_name
     # 每次动态获取角色数据
     _, _, _, lanlan_basic_config, _, _, _, _, _, _ = get_character_data()
-    # 获取live2d字段
-    live2d = lanlan_basic_config.get(ee_name, {}).get('live2d', 'mao_pro')
+    # 获取live2d/vrm字段
+    live2d = lanlan_basic_config.get(resolved, {}).get('live2d', 'mao_pro')
+    vrm_model = lanlan_basic_config.get(resolved, {}).get('vrm_model', 'EE.vrm')
     # 查找所有模型
     models = find_models()
     # 根据live2d字段查找对应的model path
     model_path = next((m["path"] for m in models if m["name"] == live2d), find_model_config_file(live2d))
+    # 规范化 VRM 路径
+    vrm_model_path = normalize_vrm_path(vrm_model)
     return templates.TemplateResponse("templates/index.html", {
         "request": request,
-        "ee_name": ee_name,
+        "ee_name": resolved,
         "model_path": model_path,
+        "vrm_model_path": vrm_model_path,
         "focus_mode": True
     })
 
 @app.get("/{ee_name}", response_class=HTMLResponse)
 async def get_index(request: Request, ee_name: str):
+    # 对非法角色名进行回退，确保页面不会误用未配置的名称
+    resolved = ee_name if ee_name in session_manager else her_name
     # 每次动态获取角色数据
     _, _, _, lanlan_basic_config, _, _, _, _, _, _ = get_character_data()
-    # 获取live2d字段
-    live2d = lanlan_basic_config.get(ee_name, {}).get('live2d', 'mao_pro')
+    # 获取live2d/vrm字段
+    live2d = lanlan_basic_config.get(resolved, {}).get('live2d', 'mao_pro')
+    vrm_model = lanlan_basic_config.get(resolved, {}).get('vrm_model', 'EE.vrm')
     # 查找所有模型
     models = find_models()
     # 根据live2d字段查找对应的model path
     model_path = next((m["path"] for m in models if m["name"] == live2d), find_model_config_file(live2d))
+    # 规范化 VRM 路径
+    vrm_model_path = normalize_vrm_path(vrm_model)
     return templates.TemplateResponse("templates/index.html", {
         "request": request,
-        "ee_name": ee_name,
+        "ee_name": resolved,
         "model_path": model_path,
+        "vrm_model_path": vrm_model_path,
         "focus_mode": False
     })
 
@@ -1801,7 +2122,9 @@ if __name__ == "__main__":
         start_config = {
             "browser_mode_enabled": True,
             "browser_page": args.page if args.page!='index' else '',
-            'server': server
+            'server': server,
+            # 默认不允许通过 Beacon 触发自动关机，避免页面关闭导致服务退出
+            'allow_beacon_shutdown': False,
         }
         set_start_config(start_config)
     else:
@@ -1809,7 +2132,8 @@ if __name__ == "__main__":
         start_config = {
             "browser_mode_enabled": False,
             "browser_page": "",
-            'server': server
+            'server': server,
+            'allow_beacon_shutdown': False,
         }
         set_start_config(start_config)
 

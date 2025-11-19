@@ -1,3 +1,18 @@
+
+
+
+
+The quality of AI-generated content is terrible and it’s everywhere. There isn’t an AI virtual streamer on the market that matches what I want, so I’m going to build one.
+
+I want a VTuber that can put on a show, provide more meaningful interactions and entertainment.
+
+So this is an open, end‑to‑end AI VTuber project. It runs VRM models with VRMA motion, HDR lighting and real‑time 3D rendering.
+
+It understands conversation with speech recognition, speaks with text‑to‑speech, and remembers context—so emotions and actions adapt as you talk. From your browser, you can trigger gestures, play animations, and control camera moves. 
+
+“AI psychosis” is a colloquial label for how prolonged, immersive use of chatbots can reinforce fixation or misread ambiguous outputs as intent. The ELIZA effect names our tendency to attribute understanding and agency to simple programs. Today’s AI applications often implicitly steer users toward these dynamics; in part, this project is intended to counter them.
+
+
 # Cipher Stage
 
 [English](#english) | [简体中文](#简体中文)
@@ -15,6 +30,7 @@ Based on `wehos/N.E.K.O` (MIT) Link: https://github.com/wehos/N.E.K.O , adapted 
 - TTS pipeline: supports cloud and local TTS (can integrate HiFi-GAN vocoder)
 - Memory & semantic retrieval: recent dialogue, time indexing, embeddings, and reranking
 - Frontend: dual-stack Three-VRM/Live2D, WebSocket streaming (audio chunks + viseme timeline)
+- Offline ASR (skeleton): local ASR plugin endpoint `/api/asr/local` ready for FunASR ONNX integration (no upstream code copied)
 
 ### Architecture Overview
 - Backend (Python/FastAPI): `main_server.py` provides WebSocket/HTTP APIs; `memory_server.py` provides memory services
@@ -133,6 +149,7 @@ MIT license. You may use, modify, and distribute the code and binaries, preservi
 - 语音合成管线：支持云端与本地 TTS, 可接入 HiFi-GAN 等声码器
 - 记忆与语义检索：近期对话、时间索引、语义嵌入与重排
 - 直播前端：Three-VRM/Live2D 双栈，WebSocket 流式消息（音频分块与嘴型时间轴）
+- 离线 ASR（骨架）：提供本地 ASR 插件接口 `/api/asr/local`，后续可接入 FunASR ONNX（不复制上游代码）
 
 ## 架构总览
 - 后端（Python/FastAPI）：`main_server.py` 提供 WebSocket/HTTP 接口；`memory_server.py` 提供记忆服务

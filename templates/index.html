@@ -13,15 +13,26 @@
     <title>{{ ee_name }} Terminal - Project EE</title>
     
     <!-- 使用 ESM three/loader/plugin，避免 UMD/real 版本造成实例混用 -->
-<!-- Import maps for ESM builds via CDN (统一到 ESM v3) -->
+<!-- Import maps for ESM builds（统一到 ESM v3，优先 CDN） -->
 <script type="importmap">
   {
     "imports": {
       "three": "/static/libs/three.module.js",
+      "three/core.js": "/static/libs/three.core.js",
+      "three/build/three.core.js": "/static/libs/three.core.js",
+      "three/build/three.module.js": "/static/libs/three.module.js",
       "three/addons/": "/static/libs/jsm/",
-        "@pixiv/three-vrm": "/static/libs/three-vrm.module.min.js",
-        "@pixiv/three-vrm-animation": "/static/libs/three-vrm-animation.module.min.js"
+      "three/examples/jsm/": "/static/libs/jsm/",
+      "@pixiv/three-vrm": "https://unpkg.com/@pixiv/three-vrm@latest?module",
+      "@pixiv/three-vrm-animation": "https://unpkg.com/@pixiv/three-vrm-animation@latest?module"
     }
+  }
+</script>
+<script>
+  // 初始化占位：实际路径稍后由后端模板注入。
+  // 若后端未提供，则使用本地默认 '/static/EE.vrm'。
+  if (typeof window.vrmModelPath === 'undefined') {
+    window.vrmModelPath = '/static/EE.vrm';
   }
 </script>
 <!-- 通过 ESM 导入并暴露到全局给非模块代码使用（分步加载，确保 GLTFLoader 先就绪） -->
@@ -39,71 +50,50 @@
   window.GLTFLoader = GLTFLoader;
   window.THREE.GLTFLoader = GLTFLoader;
 
-  // 2) VRM 插件（优先本地，其次 CDN，再回退 UMD）
+  // 2) VRM 插件（优先 CDN 的 ESM，失败则回退到本地 ESM；不再使用 UMD）
   try {
-    // 优先尝试本地 ESM 模块（请将 @pixiv/three-vrm v3 拷贝到 /static/libs/）
-    const { VRMLoaderPlugin, VRMUtils } = await import('/static/libs/three-vrm.module.min.js');
+    const { VRMLoaderPlugin, VRMUtils, VRM } = await import('@pixiv/three-vrm');
     window.VRMLoaderPluginModule = VRMLoaderPlugin;
     window.VRMUtils = VRMUtils;
     window.VRMLoaderPlugin = VRMLoaderPlugin;
     window.THREE.VRMLoaderPlugin = VRMLoaderPlugin;
-    console.log('本地 ESM VRM 插件已就绪');
-  } catch (localErr) {
+    window.VRMClass = VRM;
+    console.log('CDN ESM VRM 插件已就绪（v3），SpringBone 支持预计可用');
+    window.__VRM_STACK_READY__ = true;
+  } catch (cdnErr) {
     try {
-      // 失败则使用 CDN 的 ESM 模块
-      const { VRMLoaderPlugin, VRMUtils } = await import('@pixiv/three-vrm');
+      const { VRMLoaderPlugin, VRMUtils, VRM } = await import('/static/libs/three-vrm.module.min.js');
       window.VRMLoaderPluginModule = VRMLoaderPlugin;
       window.VRMUtils = VRMUtils;
       window.VRMLoaderPlugin = VRMLoaderPlugin;
       window.THREE.VRMLoaderPlugin = VRMLoaderPlugin;
-      console.log('CDN ESM VRM 插件已就绪');
+      window.VRMClass = VRM;
+      console.log('本地 ESM VRM 插件已就绪（回退）');
+      window.__VRM_STACK_READY__ = true;
     } catch (e) {
       console.warn('VRM 插件加载失败（ESM）：', e);
-      // 离线回退：尝试加载本地 UMD 版本 three-vrm.min.js
-      try {
-        await new Promise((resolve, reject) => {
-          const s = document.createElement('script');
-          s.src = '/static/libs/three-vrm.min.js';
-          s.async = true;
-          s.onload = () => resolve();
-          s.onerror = (err) => reject(err);
-          document.head.appendChild(s);
-        });
-        // 将 UMD 暴露的插件映射到全局变量，供非模块代码使用
-        if (window.THREE) {
-          const candidate = window.THREE.VRMLoaderPlugin || (window.THREE.VRM && window.THREE.VRM.VRMLoaderPlugin);
-          if (candidate) {
-            window.VRMLoaderPlugin = candidate;
-            window.THREE.VRMLoaderPlugin = candidate;
-            console.log('UMD VRM 插件已就绪 (本地回退)');
-          } else {
-            console.warn('UMD three-vrm.min.js 已加载，但未找到 VRMLoaderPlugin');
-          }
-        }
-      } catch (err) {
-        console.warn('本地 UMD three-vrm.min.js 加载失败：', err);
-      }
     }
   }
 
-  // 3) VRMA 插件（优先本地，其次 CDN）
+  // 3) VRMA 插件（优先 CDN 的 ESM，失败则回退到本地 ESM）
   try {
-    const { VRMAnimationLoaderPlugin, createVRMAnimationClip } = await import('/static/libs/three-vrm-animation.module.min.js');
+    const { VRMAnimationLoaderPlugin, createVRMAnimationClip } = await import('@pixiv/three-vrm-animation');
     window.VRMAnimationLoaderPluginModule = VRMAnimationLoaderPlugin;
     window.createVRMAnimationClip = createVRMAnimationClip;
     window.VRMAnimationLoaderPlugin = VRMAnimationLoaderPlugin;
-    console.log('本地 ESM VRMA 插件已就绪');
-  } catch (localErr) {
+    console.log('CDN ESM VRMA 插件已就绪');
+  } catch (cdnErr) {
     try {
-      const { VRMAnimationLoaderPlugin, createVRMAnimationClip } = await import('@pixiv/three-vrm-animation');
+      const { VRMAnimationLoaderPlugin, createVRMAnimationClip } = await import('/static/libs/three-vrm-animation.module.min.js');
       window.VRMAnimationLoaderPluginModule = VRMAnimationLoaderPlugin;
       window.createVRMAnimationClip = createVRMAnimationClip;
       window.VRMAnimationLoaderPlugin = VRMAnimationLoaderPlugin;
-      console.log('CDN ESM VRMA 插件已就绪');
+      console.log('本地 ESM VRMA 插件已就绪（回退）');
     } catch (e) {
       console.warn('VRMA 插件加载失败（ESM）：', e);
     }
   }
+  window.dispatchEvent(new Event('vrm:stack-ready'));
 })();
 </script>
 <script>
@@ -180,12 +170,17 @@
             transition: all 1s ease-in-out, height 0ms 1s, width 0ms 1s, visibility 0ms 1s;
         }
 
+        :root {
+            /* 控制面板占位的安全底部高度，默认 240px，可由脚本动态更新 */
+            --panel-safe-bottom: 240px;
+        }
+
         #vrm-container {
             position: fixed;
+            left: 0px;
             right: 0px;
-            bottom: 0px;
-            width: 100%;
-            height: 100%;
+            top: 0px;
+            bottom: var(--panel-safe-bottom, 240px);
             z-index: 10;
             pointer-events: none;
             background: none;
@@ -908,12 +903,14 @@
             }
         }
 
-        /* 控制面板样式 */
+        /* 控制面板样式（恢复底部全宽长条） */
         .control-panel {
             position: fixed;
-            bottom: 20px;
             left: 20px;
             right: 20px;
+            bottom: 20px;
+            max-height: 220px;
+            overflow-y: auto;
             background: rgba(255, 255, 255, 0.9);
             border-radius: 12px;
             padding: 16px;
@@ -921,8 +918,6 @@
             backdrop-filter: blur(10px);
             z-index: 25;
             pointer-events: auto;
-            min-width: 200px;
-            max-width: calc(100vw - 40px);
             transition: all 0.3s ease;
         }
 
@@ -1036,10 +1031,13 @@
         /* 响应式设计 */
         @media (max-width: 768px) {
             .control-panel {
-                width: 280px;
+                right: 12px;
+                bottom: 12px;
+                width: 300px;
+                max-width: 60vw;
+                max-height: calc(100vh - 140px);
                 font-size: 0.9rem;
             }
-            
             .control-panel .control-button {
                 padding: 8px 12px;
                 font-size: 0.8rem;
@@ -1132,6 +1130,9 @@
     const ee_config = { ee_name: {{ ee_name | tojson }} };
     const lanlan_config = { lanlan_name: ee_config.ee_name }; // 兼容保留
     const cubism4Model = {{ model_path | tojson }};
+    // VRM模型路径（来自后端当前角色配置）
+    const vrmModelPath = {{ (vrm_model_path or '/static/EE.vrm') | tojson }};
+    window.vrmModelPath = vrmModelPath;
     // 使用window对象避免IDE语法检查错误
     window.focus_mode = {{ focus_mode | tojson }};
     // 设置默认模型类型为VRM，以便加载EE.vrm模型
@@ -1186,11 +1187,50 @@
 <script src="/static/libs/live2d.min.js"></script>  <!-- Cubism 2.1核心库（支持旧模型） -->
 <script src="/static/libs/pixi.min.js"></script>  <!-- PixiJS v7 CDN -->
 <script src="/static/libs/index.min.js"></script>  <!-- pixi-live2d-display v0.5.0-ls-6（RaSan147 fork，支持v7） -->
-<script src="/static/vrm.js"></script>
+<!-- 以受控顺序加载非模块脚本，确保 VRM/VRMA 插件先就绪 -->
+<script type="module">
+  async function waitStackReady(maxMs = 5000) {
+    const start = Date.now();
+    if (window.__VRM_STACK_READY__) return true;
+    return await new Promise((resolve) => {
+      function done() { resolve(true); }
+      const timer = setInterval(() => {
+        if (window.__VRM_STACK_READY__ || (Date.now() - start) > maxMs) {
+          clearInterval(timer);
+          resolve(true);
+        }
+      }, 50);
+      window.addEventListener('vrm:stack-ready', () => {
+        clearInterval(timer);
+        done();
+      }, { once: true });
+    });
+  }
+  await waitStackReady();
+  // 顺序加载：先 vrm.js 后 app.js
+  await new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = '/static/vrm.js';
+    s.async = false;
+    s.onload = () => resolve();
+    s.onerror = (e) => reject(e);
+    document.body.appendChild(s);
+  });
+</script>
 <script src="/static/i18n.js"></script>
 <script src="/static/common_ui.js"></script>
 <script src="/static/live2d.js"></script>
-<script src="/static/app.js"></script>
+<script type="module">
+  // 确保 vrm.js 已经加载后再加载 app.js
+  await new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = '/static/app.js';
+    s.async = false;
+    s.onload = () => resolve();
+    s.onerror = (e) => reject(e);
+    document.body.appendChild(s);
+  });
+</script>
 <script>
   // Bind language selector to I18N
   document.addEventListener('DOMContentLoaded', function () {

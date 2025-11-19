@@ -11,7 +11,59 @@ import ssl
 import asyncio
 import time
 import pickle
-import aiohttp
+try:
+    import aiohttp
+    _AIOHTTP_AVAILABLE = True
+except Exception:
+    # Fallback to websockets if aiohttp is unavailable
+    import websockets
+    _AIOHTTP_AVAILABLE = False
+    import json as _json
+
+    class _WSAdapter:
+        def __init__(self, ws):
+            self._ws = ws
+
+        @property
+        def closed(self):
+            return getattr(self._ws, "closed", False)
+
+        async def close(self):
+            try:
+                await self._ws.close()
+            except Exception:
+                pass
+
+        async def send_json(self, data):
+            await self._ws.send(_json.dumps(data, ensure_ascii=False))
+
+        async def send_bytes(self, data: bytes):
+            await self._ws.send(data)
+
+        async def receive(self, timeout=None):
+            if timeout is None:
+                return await self._ws.recv()
+            return await asyncio.wait_for(self._ws.recv(), timeout)
+
+    class _ClientSession:
+        async def ws_connect(self, url, heartbeat=None, ssl=None):
+            # Map aiohttp heartbeat to websockets ping_interval
+            ping_interval = heartbeat if heartbeat is not None else None
+            ws = await websockets.connect(url, ping_interval=ping_interval, ssl=ssl)
+            return _WSAdapter(ws)
+
+        async def close(self):
+            # No persistent session in websockets fallback
+            return
+
+    class _ClientWebSocketResponse:
+        pass
+
+    class _AiohttpShim:
+        ClientSession = _ClientSession
+        ClientWebSocketResponse = _ClientWebSocketResponse
+
+    aiohttp = _AiohttpShim()
 from config import MONITOR_SERVER_PORT, MEMORY_SERVER_PORT, COMMENTER_SERVER_PORT, TOOL_SERVER_PORT
 from datetime import datetime
 import json

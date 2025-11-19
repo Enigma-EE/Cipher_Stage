@@ -248,6 +248,7 @@ numpy==1.26.4
     #   together
     #   xiao8
 openai==1.99.9
+faster-whisper
     # via
     #   gui-agents
     #   langchain-openai

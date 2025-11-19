@@ -12,15 +12,34 @@ class CompressedRecentHistoryManager:
     def __init__(self, max_history_length=10):
         # 通过get_character_data获取相关变量
         _, _, _, _, name_mapping, _, _, _, _, recent_log = get_character_data()
+        # 统一将路径规范化为项目内存模块的绝对路径，并确保目录存在
+        base_store_dir = os.path.join(os.path.dirname(__file__), 'store')
+        os.makedirs(base_store_dir, exist_ok=True)
+        # 将映射转换为绝对文件路径（统一到 memory/store 下）
+        recent_log_abs = {}
+        for k, v in recent_log.items():
+            recent_log_abs[k] = os.path.join(base_store_dir, os.path.basename(v))
         # 修复API key类型问题
         api_key = OPENROUTER_API_KEY if OPENROUTER_API_KEY and OPENROUTER_API_KEY != '' else None
-        self.llm = ChatOpenAI(model=SUMMARY_MODEL, base_url=OPENROUTER_URL, api_key=api_key, temperature=0.3)
-        self.review_llm = ChatOpenAI(model=CORRECTION_MODEL, base_url=OPENROUTER_URL, api_key=api_key, temperature=0.1)
+        # 如果没有配置 API Key，避免在启动阶段强行初始化远程 LLM，允许系统以降级模式运行
+        self.llm = None
+        self.review_llm = None
+        try:
+            if api_key:
+                self.llm = ChatOpenAI(model=SUMMARY_MODEL, base_url=OPENROUTER_URL, api_key=api_key, temperature=0.3)
+                self.review_llm = ChatOpenAI(model=CORRECTION_MODEL, base_url=OPENROUTER_URL, api_key=api_key, temperature=0.1)
+        except Exception as e:
+            print("初始化摘要/审阅模型失败：", e)
+            self.llm = None
+            self.review_llm = None
         self.max_history_length = max_history_length
-        self.log_file_path = recent_log
+        self.log_file_path = recent_log_abs
         self.name_mapping = name_mapping
         self.user_histories = {}
         for ln in self.log_file_path:
+            # 确保父目录存在
+            dirname = os.path.dirname(self.log_file_path[ln])
+            os.makedirs(dirname, exist_ok=True)
             if os.path.exists(self.log_file_path[ln]):
                 with open(self.log_file_path[ln], encoding='utf-8') as f:
                     self.user_histories[ln] = messages_from_dict(json.load(f))
@@ -48,6 +67,8 @@ class CompressedRecentHistoryManager:
             import traceback
             traceback.print_exc()
 
+        # 写入前确保目录存在
+        os.makedirs(os.path.dirname(self.log_file_path[lanlan_name]), exist_ok=True)
         with open(self.log_file_path[lanlan_name], "w", encoding='utf-8') as f:
             json.dump(messages_to_dict(self.user_histories[lanlan_name]), f, indent=2, ensure_ascii=False)
 
@@ -81,6 +102,11 @@ class CompressedRecentHistoryManager:
         else:
             prompt = detailed_recent_history_manager_prompt % messages_text
 
+        # 如果远程摘要模型不可用，使用本地降级策略：直接截断拼接文本作为备忘录，避免启动失败
+        if self.llm is None:
+            fallback = messages_text[:500]
+            return SystemMessage(content=f"先前对话的备忘录: {fallback}"), fallback
+
         retries = 0
         while retries < 3:
             try:
@@ -100,7 +126,6 @@ class CompressedRecentHistoryManager:
                         summary = self.further_compress(summary)
                         if summary is None:
                             continue
-                    # Listen. Here, summary_json['对话摘要'] is not supposed to be anything else than str, but Qwen is shit.
                     return SystemMessage(content=f"先前对话的备忘录: {summary}"), str(summary_json['对话摘要'])
                 else:
                     print('💥 摘要failed: ', response_content)
@@ -109,7 +134,7 @@ class CompressedRecentHistoryManager:
                 print('摘要模型失败：', e)
                 # 如果解析失败，重试
                 retries += 1
-        # 如果所有重试都失败，返回None
+        # 如果所有重试都失败，返回简要备忘录
         return SystemMessage(content=f"先前对话的备忘录: 无。"), ""
 
     def further_compress(self, initial_summary):
@@ -189,10 +214,14 @@ class CompressedRecentHistoryManager:
             
             history_text += f"{role}: {content}\n\n"
         
+        # 如果未配置远程审阅模型，跳过审阅
+        if self.review_llm is None:
+            print(f"💡 {lanlan_name} 的审阅模型未配置，跳过审阅")
+            return False
         try:
             # 使用LLM审阅历史记录
             prompt = history_review_prompt % (self.name_mapping['human'], name_mapping['ai'], history_text, self.name_mapping['human'], name_mapping['ai'])
-            response_content = self.llm.invoke(prompt).content
+            response_content = self.review_llm.invoke(prompt).content
             
             # 确保response_content是字符串
             if isinstance(response_content, list):

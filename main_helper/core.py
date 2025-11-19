@@ -26,7 +26,7 @@ from config import get_character_data, CORE_URL, CORE_MODEL, EMOTION_MODEL, CORE
 from multiprocessing import Process, Queue as MPQueue
 from uuid import uuid4
 import numpy as np
-from librosa import resample
+import soxr
 import httpx 
 
 # Setup logger for this module
@@ -211,7 +211,8 @@ class LLMSessionManager:
             if self.websocket and hasattr(self.websocket, 'client_state') and self.websocket.client_state == self.websocket.client_state.CONNECTED:
                 # 这里假设audio_data为PCM16字节流，直接推送
                 audio = np.frombuffer(audio_data, dtype=np.int16)
-                audio = (resample(audio.astype(np.float32) / 32768.0, orig_sr=24000, target_sr=48000)*32767.).clip(-32768, 32767).astype(np.int16)
+                # 使用 soxr 进行高质量重采样，避免 librosa 依赖问题
+                audio = (soxr.resample(audio.astype(np.float32) / 32768.0, 24000, 48000) * 32767.).clip(-32768, 32767).astype(np.int16)
 
                 await self.send_speech(audio.tobytes())
                 # 你可以根据需要加上格式、isNewMessage等标记
@@ -354,9 +355,18 @@ class LLMSessionManager:
             self.initial_cache_snapshot_len = 0
 
         try:
-            # 获取初始 prompt
+            # 获取初始 prompt（记忆服务器不可用时优雅降级）
             initial_prompt = ("你是一个角色扮演大师，并且精通电脑操作。请按要求扮演以下角色（self.lanlan_name），并在对方请求时、回答“我试试”并尝试操纵电脑。" if self._is_agent_enabled() else "你是一个角色扮演大师。请按要求扮演以下角色（self.lanlan_name）。") + self.lanlan_prompt
-            initial_prompt += requests.get(f"http://127.0.0.1:{self.memory_server_port}/new_dialog/{self.lanlan_name}").text
+            # 若禁用记忆服务器或端口无效，则跳过调用
+            if isinstance(self.memory_server_port, int) and self.memory_server_port > 0:
+                try:
+                    ms_url = f"http://127.0.0.1:{self.memory_server_port}/new_dialog/{self.lanlan_name}"
+                    initial_prompt += requests.get(ms_url, timeout=1.2).text
+                except Exception as ms_err:
+                    logger.warning(f"记忆服务器不可用或未就绪，使用最小化初始提示。原因: {ms_err}")
+                    initial_prompt += f"\n========{self.lanlan_name}的内心活动========\n{self.lanlan_name}刚刚上线，暂无近期记忆。请与{self.master_name}开始对话。\n"
+            else:
+                initial_prompt += f"\n========{self.lanlan_name}的内心活动========\n{self.lanlan_name}刚刚上线，暂无近期记忆。请与{self.master_name}开始对话。\n"
             # logger.info("====Initial Prompt=====")
             # logger.info(initial_prompt)
 
@@ -377,7 +387,7 @@ class LLMSessionManager:
                 raise Exception("Session not initialized")
             
         except Exception as e:
-            error_message = f"Error starting session: {e}"
+            error_message = f"Error starting session: {e} [lanlan_name={self.lanlan_name}, port={self.memory_server_port}]"
             logger.error(f"💥 {error_message}")
             traceback.print_exc()
             await self.send_status(error_message)
@@ -431,9 +441,16 @@ class LLMSessionManager:
             
             initial_prompt = ("你是一个角色扮演大师，并且精通电脑操作。请按要求扮演以下角色（self.lanlan_name），在对方请求时、回答“我试试”并尝试操纵电脑。" if self._is_agent_enabled() else "你是一个角色扮演大师。请按要求扮演以下角色（self.lanlan_name）。") + self.lanlan_prompt
             self.initial_cache_snapshot_len = len(self.message_cache_for_new_session)
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(f"http://127.0.0.1:{self.memory_server_port}/new_dialog/{self.lanlan_name}")
-                initial_prompt += resp.text + self._convert_cache_to_str(self.message_cache_for_new_session)
+            # 禁用或端口无效时跳过记忆服务器调用
+            if isinstance(self.memory_server_port, int) and self.memory_server_port > 0:
+                async with httpx.AsyncClient() as client:
+                    try:
+                        resp = await client.get(f"http://127.0.0.1:{self.memory_server_port}/new_dialog/{self.lanlan_name}")
+                        initial_prompt += resp.text + self._convert_cache_to_str(self.message_cache_for_new_session)
+                    except Exception:
+                        initial_prompt += self._convert_cache_to_str(self.message_cache_for_new_session)
+            else:
+                initial_prompt += self._convert_cache_to_str(self.message_cache_for_new_session)
             # print(initial_prompt)
             await self.pending_session.connect(initial_prompt, native_audio = not self.use_tts)
 
@@ -848,7 +865,7 @@ def speech_synthesis_worker(request_queue, response_queue, audio_api_key, voice_
     import dashscope
     from dashscope.audio.tts_v2 import ResultCallback, SpeechSynthesizer, AudioFormat
     import numpy as np
-    from librosa import resample
+    import soxr
     import re
     import time
     dashscope.api_key = audio_api_key
@@ -859,7 +876,7 @@ def speech_synthesis_worker(request_queue, response_queue, audio_api_key, voice_
         def on_open(self): pass
         def on_complete(self): 
             if len(self.cache)>0:
-                data = (resample(self.cache, orig_sr=24000, target_sr=48000)*32768.).clip(-32768, 32767).astype(np.int16).tobytes()
+                data = (soxr.resample(self.cache, 24000, 48000)*32768.).clip(-32768, 32767).astype(np.int16).tobytes()
                 self.response_queue.put(data)
                 self.cache = np.zeros(0).astype(np.float32)
         def on_error(self, message: str): print(f"TTS Error: {message}")
@@ -870,7 +887,7 @@ def speech_synthesis_worker(request_queue, response_queue, audio_api_key, voice_
             self.cache = np.concatenate([self.cache, audio])
             if len(self.cache)>=8000:
                 data = self.cache[:8000]
-                data = (resample(data, orig_sr=24000, target_sr=48000)*32768.).clip(-32768, 32767).astype(np.int16).tobytes()
+                data = (soxr.resample(data, 24000, 48000)*32768.).clip(-32768, 32767).astype(np.int16).tobytes()
                 self.response_queue.put(data)
                 self.cache = self.cache[8000:]
             

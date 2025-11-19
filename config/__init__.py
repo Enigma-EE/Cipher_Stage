@@ -141,6 +141,12 @@ try:
         EMOTION_MODEL = "qwen-turbo-2025-07-15"
         AUDIO_API_KEY = OPENROUTER_API_KEY = ASSIST_API_KEY_QWEN
 
+    # 音频合成相关配置（本地/云端）
+    AUDIO_ENGINE = core_cfg.get('audioEngine', 'cloud')  # 'cloud' | 'local'
+    AUDIO_LOCAL_PROVIDER = core_cfg.get('audioLocalProvider', 'pyttsx3')
+    AUDIO_LOCAL_URL = core_cfg.get('audioLocalUrl', '')
+    AUDIO_VOICE = core_cfg.get('audioVoice', '')
+
 except FileNotFoundError:
     pass
 except Exception as e:

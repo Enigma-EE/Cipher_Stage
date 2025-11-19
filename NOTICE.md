@@ -8,6 +8,11 @@ This repository reuses and adapts upstream components and third‑party librarie
 - Link: https://github.com/wehos/N.E.K.O
 - Notes: Portions of code and structure are adapted. Original copyrights and attribution are preserved per MIT.
 
+- Name: `swordswind/ai_virtual_mate_web`
+- License: GPL-3.0
+- Link: https://github.com/swordswind/ai_virtual_mate_web
+- Notes: If code from this project is merged, GPL-3.0 terms apply to the combined work per distribution. Preserve original notices, include upstream LICENSE, and provide complete corresponding source when distributing.
+
 ## Third‑Party Libraries & Assets
 - three.js / three-vrm
   - License: MIT

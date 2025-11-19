@@ -655,6 +655,8 @@ if (chatContentWrapper) {
     const ee_config = { ee_name: "{{ ee_name }}" };
     const lanlan_config = { lanlan_name: ee_config.ee_name };
 </script>
+<!-- 先引入 VRM 管理器，避免在切换到 VRM 时出现未找到管理器的问题 -->
+<script src="/static/vrm.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

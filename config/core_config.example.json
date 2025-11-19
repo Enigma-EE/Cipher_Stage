@@ -4,5 +4,9 @@
   "assistApi": "qwen",
   "assistApiKeyQwen": "",
   "assistApiKeyOpenai": "",
-  "assistApiKeyGlm": ""
+  "assistApiKeyGlm": "",
+  "audioEngine": "cloud",  
+  "audioLocalProvider": "pyttsx3", 
+  "audioLocalUrl": "http://127.0.0.1:5000/tts",
+  "audioVoice": "" 
 }

@@ -1,8 +1,8 @@
 @echo off
 chcp 65001  > nul  & rem 设置代码页为UTF-8
 
-REM 使用预设好的API地址（统一为48921端口）
-set API_BASE_URL="http://localhost:48921/"
+REM 使用预设好的API地址（统一为48922端口）
+set API_BASE_URL="http://localhost:48922/"
 echo API地址: %API_BASE_URL%
 
 REM ------------ 启动两个服务（附着在同一控制台） ----------

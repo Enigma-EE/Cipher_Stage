@@ -73,7 +73,7 @@ def update_model_preferences(model_path: str, position: Dict[str, float], scale:
                 model_index = i
                 break
         
-        # 创建新的模型偏好
+        # 创建新的模型偏好（旧版字段，仅包含位置/缩放）
         new_model_pref = {
             'model_path': model_path,
             'position': position,
@@ -91,6 +91,46 @@ def update_model_preferences(model_path: str, position: Dict[str, float], scale:
         return save_user_preferences(current_preferences)
     except Exception as e:
         print(f"更新模型偏好失败: {e}")
+        return False
+
+def update_preferences_generic(preferences: Dict[str, Any]) -> bool:
+    """
+    更新（或创建）包含扩展字段的模型偏好设置。
+
+    该方法在保留必需字段的同时，允许写入额外的显示/美观参数，例如灯光、色彩空间、取景预设、地面、环境贴图等。
+
+    Args:
+        preferences (Dict[str, Any]): 完整偏好对象，至少包含 'model_path', 'position', 'scale' 字段，其他字段将原样保存。
+
+    Returns:
+        bool: 保存成功返回 True。
+    """
+    try:
+        if not validate_model_preferences(preferences):
+            return False
+
+        current_preferences = load_user_preferences()
+        model_path = preferences.get('model_path')
+
+        # 查找既有项
+        model_index = -1
+        for i, pref in enumerate(current_preferences):
+            if pref.get('model_path') == model_path:
+                model_index = i
+                break
+
+        if model_index >= 0:
+            # 合并更新（保留已有自定义字段）
+            merged = dict(current_preferences[model_index])
+            merged.update(preferences)
+            current_preferences[model_index] = merged
+        else:
+            # 新增项置顶
+            current_preferences.insert(0, preferences)
+
+        return save_user_preferences(current_preferences)
+    except Exception as e:
+        print(f"更新通用偏好失败: {e}")
         return False
 
 def get_model_preferences(model_path: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -186,4 +226,4 @@ def move_model_to_top(model_path: str) -> bool:
             return False
     except Exception as e:
         print(f"移动模型到顶部失败: {e}")
-        return False 
+        return False

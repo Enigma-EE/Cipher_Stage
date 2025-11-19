@@ -18,6 +18,10 @@ class VRMManager {
         this.animationLibrary = {};
         this.clipActions = {};
         this.currentClipAction = null;
+        // 默认待机 VRMA 的状态
+        this.defaultIdleClipName = null;
+        this.defaultIdleAction = null;
+        this._defaultIdleUrl = '/static/animations/StandingIdle01.vrma';
         this.currentEmotion = 'neutral';
         this.mouthValue = 0;
         this.blinkValue = 0;
@@ -34,6 +38,26 @@ class VRMManager {
         this.dragEnabled = false;
         this.isFocusing = false;
         this.isLocked = true;
+        // 是否在窗口变化/加载时自动构图（默认关闭，避免覆盖手动相机）
+        this._autoCompose = false;
+        // 取景预设：face/half/full，默认半身
+        this._framePreset = 'half';
+        // 相机平滑过渡参数与状态
+        this._cameraDesiredPos = null;
+        this._cameraDesiredLook = null;
+        this._cameraLookCurrent = null;
+        this._cameraLerpSpeed = 4.0;
+
+        // 舞台灯光与地面引用
+        this._keyLight = null;
+        this._fillLight = null;
+        this._rimLight = null;
+        this._hemiLight = null;
+        this._lightTarget = null;
+        this._ground = null;
+        // 环境与美观参数状态
+        this._environmentUrl = null;
+        this._useHDRBackground = false;
         
         // 渲染循环句柄
         this._animationFrameId = null;
@@ -44,8 +68,558 @@ class VRMManager {
             allowHipsRotation: true,     // 默认允许髋骨旋转（夹角限制生效）
             clampHipsRotationDeg: 35     // 髋骨旋转夹角限制（度）
         };
+
+        // 无重力测试模式（用于定位刘海前冲是否由重力导致）
+        this._noGravityTest = false; // 默认关闭；如需验证可通过 setNoGravityTest(true) 开启
+
+        // 物理干预开关（默认全部关闭，遵循模型自身参数）
+        this._enableHairTuning = false;      // 是否微调头发的 springbone 参数
+        this._forceSpringGravity = false;    // 是否强制设置重力方向为世界 -Y
+        this._forceSpringCenter = false;     // 是否强制 springbone 中心为 hips/scene root
+
+        // 最近一次加载的 GLTF 与 JSON（用于调试扩展与插件是否生效）
+        this._lastGltf = null;
+        this._lastGltfJson = null;
     }
-    
+
+    // 兜底：直接从 GLB 文件中解析 JSON chunk（当 GLTFLoader 未暴露 parser.json 时使用）
+    async _fetchGlbJson(url) {
+        try {
+            const res = await fetch(url);
+            if (!res.ok) throw new Error('网络响应失败: ' + res.status);
+            const buf = await res.arrayBuffer();
+            const dv = new DataView(buf);
+            // GLB header: magic(0)='glTF', version(4)=2, length(8)
+            const magic = dv.getUint32(0, true);
+            const version = dv.getUint32(4, true);
+            if (magic !== 0x46546C67 || version !== 2) throw new Error('非 GLB v2 文件');
+            let offset = 12; // header size
+            // 遍历 chunks，寻找 JSON
+            while (offset + 8 <= buf.byteLength) {
+                const chunkLength = dv.getUint32(offset, true); offset += 4;
+                const chunkType = dv.getUint32(offset, true); offset += 4;
+                if (chunkType === 0x4E4F534A) { // 'JSON'
+                    const jsonBytes = new Uint8Array(buf, offset, chunkLength);
+                    const text = new TextDecoder('utf-8').decode(jsonBytes);
+                    return JSON.parse(text);
+                }
+                offset += chunkLength; // 跳过该 chunk
+            }
+            throw new Error('未找到 JSON chunk');
+        } catch (e) {
+            console.warn('GLB JSON 兜底解析失败:', e);
+            return null;
+        }
+    }
+
+    // 仅针对“头发”相关骨骼微调物理参数，避免出现“漂浮”
+    _tuneHairPhysics(springBoneManager) {
+        if (!springBoneManager) return;
+        // 扩大匹配范围，兼容中日英文常见命名
+        const hairKeys = ['hair', 'bang', 'fringe', 'front', 'pony', 'braid', '髪', '发', '刘海'];
+        let touched = 0;
+
+        // VRM1 结构：manager.joints[], 每个 joint 有 node/settings
+        const joints = springBoneManager.joints;
+        if (Array.isArray(joints) && joints.length > 0) {
+            for (const j of joints) {
+                const n = (j && (j.node?.name || j.bone?.name || j._node?.name)) || '';
+                const low = String(n).toLowerCase();
+                const isHair = hairKeys.some(k => low.includes(k));
+                if (!isHair) continue;
+                const s = j.settings || j._settings || j.params || j._params;
+                if (!s) continue;
+                // 更强的“向下”效果：提高重力，适度增加阻尼，降低刚度
+                if (s.gravityPower !== undefined) s.gravityPower = Math.max(1.6, Number(s.gravityPower) || 1.6);
+                if (s.dragForce !== undefined) s.dragForce = Math.max(0.5, Number(s.dragForce) || 0.5);
+                if (s.stiffness !== undefined) s.stiffness = Math.min(0.6, Math.max(0.2, Number(s.stiffness) || 0.2));
+                // 如支持重力方向字段，强制向世界-Y
+                if (s.gravityDir && typeof s.gravityDir.copy === 'function') {
+                    try { s.gravityDir.copy(new THREE.Vector3(0, -1, 0)); } catch (_) {}
+                }
+                touched++;
+            }
+        } else if (Array.isArray(springBoneManager.springBoneGroupList)) {
+            // VRM0 结构：groupList，每组拥有 dragForce/stiffness/gravityPower 等
+            for (const g of springBoneManager.springBoneGroupList) {
+                const names = (g?.bones || []).map(b => String(b?.name || '').toLowerCase());
+                const isHair = names.some(nm => hairKeys.some(k => nm.includes(k)));
+                if (!isHair) continue;
+                if (g.gravityPower !== undefined) g.gravityPower = Math.max(1.6, Number(g.gravityPower) || 1.6);
+                if (g.dragForce !== undefined) g.dragForce = Math.max(0.5, Number(g.dragForce) || 0.5);
+                if (g.stiffness !== undefined) g.stiffness = Math.min(0.6, Math.max(0.2, Number(g.stiffness) || 0.2));
+                touched++;
+            }
+        }
+
+        if (touched > 0) {
+            console.log(`已微调头发物理参数，影响关节/组数量: ${touched}`);
+        } else {
+            console.log('未检测到明显的头发关节，未做物理微调');
+        }
+    }
+
+    // 进一步修正：为SpringBone设置合适的参考中心与重力，缓解“刘海前冲”
+    _stabilizeHairForwardIssue(vrm) {
+        try {
+            const mgr = vrm?.springBoneManager;
+            if (!mgr) return;
+            // 设置中心为稳定的世界参考（优先 hips，其次模型根），避免头部动画改变重力方向
+            let centerNode = null;
+            try {
+                const hum = vrm.humanoid;
+                if (hum && typeof hum.getNormalizedBoneNode === 'function') {
+                    centerNode = hum.getNormalizedBoneNode('hips') || vrm.scene; // hips 更稳；无则使用根
+                }
+            } catch (_) { centerNode = vrm.scene; }
+            if (!centerNode) centerNode = vrm.scene;
+            if (this._forceSpringCenter && centerNode) {
+                if ('center' in mgr && mgr.center !== centerNode) {
+                    try { mgr.center = centerNode; console.log('SpringBone中心设为:', centerNode.name || 'scene-root'); } catch (_) {}
+                }
+            }
+            // 再次明确重力方向（某些模型重力可能默认沿Z）
+            try {
+                const gdir = new THREE.Vector3(0, -1, 0);
+                if (this._forceSpringGravity) {
+                    if (typeof mgr.setGravity === 'function') {
+                        mgr.setGravity(gdir);
+                    } else if (mgr.gravity && typeof mgr.gravity.copy === 'function') {
+                        mgr.gravity.copy(gdir);
+                    }
+                }
+            } catch (_) {}
+        } catch (_) {}
+    }
+
+    // 将SpringBone的重力置零，用于“无重力测试”
+    _applyNoGravityToSpringBones(vrm) {
+        try {
+            const mgr = vrm?.springBoneManager;
+            if (!mgr) return;
+            const zero = new THREE.Vector3(0, 0, 0);
+            try {
+                if (typeof mgr.setGravity === 'function') {
+                    mgr.setGravity(zero.clone());
+                } else if (mgr.gravity && typeof mgr.gravity.copy === 'function') {
+                    mgr.gravity.copy(zero);
+                }
+            } catch (_) {}
+
+            const joints = mgr.joints;
+            if (Array.isArray(joints) && joints.length > 0) {
+                for (const j of joints) {
+                    const s = j.settings || j._settings || j.params || j._params;
+                    if (!s) continue;
+                    if (s.gravityPower !== undefined) s.gravityPower = 0;
+                    // 保留少量阻尼以避免抖动
+                    if (s.dragForce !== undefined) s.dragForce = Math.max(0.2, Number(s.dragForce) || 0.2);
+                    if (s.gravityDir && typeof s.gravityDir.set === 'function') {
+                        try { s.gravityDir.set(0, 0, 0); } catch (_) {}
+                    }
+                }
+                console.log(`无重力测试：已处理 joints=${joints.length}`);
+            } else if (Array.isArray(mgr.springBoneGroupList)) {
+                const groups = mgr.springBoneGroupList;
+                for (const g of groups) {
+                    if (g.gravityPower !== undefined) g.gravityPower = 0;
+                    if (g.gravityDir && typeof g.gravityDir.set === 'function') {
+                        try { g.gravityDir.set(0, 0, 0); } catch (_) {}
+                    }
+                }
+                console.log(`无重力测试：已处理 groups=${groups.length}`);
+            }
+        } catch (e) {
+            console.warn('应用无重力测试失败:', e);
+        }
+    }
+
+    // 对外开关：启用/关闭无重力测试模式
+    setNoGravityTest(enabled = true) {
+        try {
+            this._noGravityTest = !!enabled;
+            const vrm = this.currentModel;
+            if (this._noGravityTest && vrm?.springBoneManager) {
+                this._applyNoGravityToSpringBones(vrm);
+            }
+            console.log('无重力测试模式:', this._noGravityTest ? '开启' : '关闭');
+        } catch (e) { console.warn('设置无重力测试模式失败:', e); }
+    }
+
+    // 调试助手：打印 SpringBone 的基本信息
+    debugSpringBones() {
+        try {
+            const vrm = this.currentModel;
+            const mgr = vrm?.springBoneManager;
+            if (!mgr) { console.warn('SpringBone 管理器不存在'); return; }
+            const groups = Array.isArray(mgr.springBoneGroupList) ? mgr.springBoneGroupList : [];
+            const joints = Array.isArray(mgr.joints) ? mgr.joints : [];
+            console.log('[SpringBone] groups:', groups.length, 'joints:', joints.length);
+            if (groups.length > 0) {
+                for (let i = 0; i < Math.min(groups.length, 5); i++) {
+                    const g = groups[i];
+                    console.log(`  group[${i}]`, g && (g.name || g.id || Object.keys(g)));
+                }
+            }
+            // 输出中心与重力
+            try {
+                const center = mgr.center || null;
+                const gdir = mgr.gravity || null;
+                console.log('[SpringBone] center:', center && (center.name || center.uuid || 'object'));
+                if (gdir) console.log('[SpringBone] gravity:', gdir.x?.toFixed?.(2), gdir.y?.toFixed?.(2), gdir.z?.toFixed?.(2));
+            } catch (_) {}
+        } catch (e) { console.warn('打印 SpringBone 信息失败:', e); }
+    }
+
+    // 调试助手：打印 VRM/GLTF 扩展情况，判断是否包含 VRM0/VRM1/SpringBone
+    debugVrmExtensions() {
+        try {
+            const vrm = this.currentModel;
+            if (!vrm) { console.warn('当前没有VRM模型'); return; }
+            // 先使用最近保存的 JSON；若不存在再尝试从 vrm 实例侧找
+            let json = this._lastGltfJson;
+            if (!json) {
+                const gltf = vrm?.gltf || vrm?.__gltf || null;
+                json = gltf?.parser?.json || null;
+            }
+            const ex = (json && json.extensions) || {};
+            const keys = Object.keys(ex);
+            console.log('GLTF 扩展 keys:', keys);
+            console.log('包含 VRMC_vrm:', !!ex.VRMC_vrm, 'VRM0:', !!ex.VRM, 'VRMC_springBone:', !!ex.VRMC_springBone);
+        } catch (e) { console.warn('打印扩展信息失败:', e); }
+    }
+
+    // 调试助手：打印材质信息，快速定位“仅刘海异常”是否由材质导致
+    debugMaterials({ includeHairOnly = true } = {}) {
+        try {
+            const vrm = this.currentModel;
+            if (!vrm) { console.warn('当前没有VRM模型'); return; }
+            const hairKeys = ['hair', 'bang', 'fringe', 'front', 'pony', 'braid', '髪', '发', '刘海'];
+            vrm.scene.traverse(obj => {
+                if (!obj.isMesh || !obj.material) return;
+                const nm = String(obj.name || '').toLowerCase();
+                if (includeHairOnly) {
+                    if (!hairKeys.some(k => nm.includes(k))) return;
+                }
+                const m = obj.material;
+                const info = {
+                    name: obj.name,
+                    type: m.type,
+                    transparent: !!m.transparent,
+                    alphaTest: m.alphaTest,
+                    depthTest: !!m.depthTest,
+                    depthWrite: !!m.depthWrite,
+                    side: m.side,
+                    renderOrder: obj.renderOrder,
+                    blending: m.blending,
+                };
+                // MToon 的关键字段（如果存在）
+                if (m.userData && m.userData.mtoon) {
+                    info.mtoon = {
+                        shadingShift: m.userData.mtoon.shadingShift,
+                        outlineWidth: m.userData.mtoon.outlineWidth,
+                        rimLightingMix: m.userData.mtoon.rimLightingMix,
+                    };
+                }
+                console.log('[Material]', info);
+            });
+        } catch (e) { console.warn('打印材质信息失败:', e); }
+    }
+
+    // 显式切换“无物理头发补偿”
+    setNoPhysicsHair(enabled = false) {
+        try {
+            this._noPhysicsHairEnabled = !!enabled;
+            const vrm = this.currentModel;
+            if (this._noPhysicsHairEnabled) {
+                console.warn('已开启无物理头发补偿');
+                if (vrm) this._setupNoPhysicsHairCompensation(vrm);
+            } else {
+                console.log('已关闭无物理头发补偿');
+            }
+        } catch (e) { console.warn('切换无物理头发补偿失败:', e); }
+    }
+
+    // 开关：是否微调头发的物理参数（默认关闭）
+    enableHairTuning(enabled = true) {
+        this._enableHairTuning = !!enabled;
+        console.log('Hair Tuning:', this._enableHairTuning ? 'ON' : 'OFF');
+    }
+
+    // 开关：是否强制 SpringBone 的重力与中心（默认关闭）
+    forceSpringPhysics({ gravity = true, center = true } = {}) {
+        this._forceSpringGravity = !!gravity;
+        this._forceSpringCenter = !!center;
+        console.log('Force SpringBone:', `gravity=${this._forceSpringGravity}`, `center=${this._forceSpringCenter}`);
+        // 立即应用到当前模型（若存在）
+        try {
+            const vrm = this.currentModel;
+            if (vrm && vrm.springBoneManager) this._stabilizeHairForwardIssue(vrm);
+        } catch (_) {}
+    }
+
+    // 设置 SpringBone 的重力方向
+    setSpringGravityDir(x = 0, y = -1, z = 0) {
+        try {
+            const vrm = this.currentModel;
+            const mgr = vrm?.springBoneManager;
+            if (!mgr) { console.warn('SpringBone 管理器不存在'); return; }
+            const gdir = new THREE.Vector3(Number(x)||0, Number(y)||-1, Number(z)||0);
+            if (typeof mgr.setGravity === 'function') mgr.setGravity(gdir);
+            else if (mgr.gravity && typeof mgr.gravity.copy === 'function') mgr.gravity.copy(gdir);
+            console.log('SpringBone 重力方向设为:', gdir.x, gdir.y, gdir.z);
+        } catch (e) { console.warn('设置 SpringBone 重力方向失败:', e); }
+    }
+
+    // 应用 three.js 示例风格的灯光/阴影/地面与视角预设
+    applyThreeExamplePreset() {
+        if (!this.renderer || !this.scene || !this.camera) return;
+
+        // 相机：回到原始设置并指向原点
+        try {
+            this.camera.fov = 40;
+            this.camera.near = 0.1;
+            this.camera.far = 100;
+            this.camera.position.set(0, 0, 2.5);
+            this.camera.lookAt(0, 0, 0);
+            this.camera.updateProjectionMatrix();
+        } catch (_) {}
+
+        // 统一渲染器参数
+        this.renderer.shadowMap.enabled = true;
+        this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        // 默认使用线性色调映射，使整体更干净自然
+        this.renderer.toneMapping = THREE.LinearToneMapping;
+        this.renderer.toneMappingExposure = 1.0;
+
+        // 三点布光：Key / Fill / Rim
+        this._lightTarget = new THREE.Object3D();
+        this._lightTarget.position.set(0, 1.4, 0);
+        this.scene.add(this._lightTarget);
+
+        // Key 光（暖色定向光）
+        this._keyLight = new THREE.DirectionalLight(0xffe6cf, 1.8);
+        this._keyLight.position.set(-1.6, 2.8, 2.8);
+        this._keyLight.castShadow = true;
+        this._keyLight.shadow.mapSize.set(2048, 2048);
+        this._keyLight.shadow.camera.near = 0.3;
+        this._keyLight.shadow.camera.far = 30;
+        this._keyLight.shadow.camera.left = -8;
+        this._keyLight.shadow.camera.right = 8;
+        this._keyLight.shadow.camera.top = 8;
+        this._keyLight.shadow.camera.bottom = -8;
+        this._keyLight.shadow.bias = -0.0008;
+        this._keyLight.shadow.normalBias = 0.6;
+        this._keyLight.target = this._lightTarget;
+        this.scene.add(this._keyLight);
+
+        // Fill 光（冷色点光）
+        this._fillLight = new THREE.PointLight(0x8fb7ff, 1.2, 10, 2);
+        this._fillLight.position.set(1.8, 1.8, 2.0);
+        this._fillLight.castShadow = false;
+        this.scene.add(this._fillLight);
+
+        // Rim 光（背部定向光）
+        this._rimLight = new THREE.DirectionalLight(0xb8d8ff, 0.9);
+        this._rimLight.position.set(0.8, 2.4, -2.6);
+        this._rimLight.castShadow = false;
+        this._rimLight.target = this._lightTarget;
+        this.scene.add(this._rimLight);
+
+        // 柔和半球环境光：提供整体环境照明与更自然的阴影过渡
+        try {
+            this._hemiLight = new THREE.HemisphereLight(0xffffff, 0x222233, 0.35);
+            this._hemiLight.position.set(0, 1.5, 0);
+            this.scene.add(this._hemiLight);
+        } catch (_) {}
+
+        // 地面可见 + 影子接收（不写入深度，避免遮挡模型）
+        try {
+            const groundGeo = new THREE.PlaneGeometry(40, 40);
+            const groundMatVisible = new THREE.MeshStandardMaterial({ color: 0x3a3a40, roughness: 0.95, metalness: 0.02 });
+            groundMatVisible.depthWrite = false;
+            const groundVisible = new THREE.Mesh(groundGeo, groundMatVisible);
+            groundVisible.rotation.x = -Math.PI / 2;
+            groundVisible.receiveShadow = true;
+            groundVisible.position.set(0, 0, 0);
+            groundVisible.renderOrder = -1;
+            this.scene.add(groundVisible);
+
+            // 叠加一层更柔和的影子材质（可选）
+            const groundMatShadow = new THREE.ShadowMaterial({ opacity: 0.32 });
+            groundMatShadow.depthWrite = false;
+            const groundShadow = new THREE.Mesh(groundGeo, groundMatShadow);
+            groundShadow.rotation.x = -Math.PI / 2;
+            groundShadow.receiveShadow = true;
+            groundShadow.position.set(0, 0.001, 0);
+            groundShadow.renderOrder = -1;
+            this.scene.add(groundShadow);
+            // 记录影子层与可见地面用于后续微调高度
+            this._ground = groundShadow;
+            this._groundVisible = groundVisible;
+        } catch (e) {
+            console.warn('创建地面阴影失败:', e);
+        }
+
+        // 舞台聚光：形成地面高光圈
+        try {
+            const spot = new THREE.SpotLight(0xffffff, 0.9, 0, Math.PI / 8, 0.45, 1.5);
+            spot.position.set(0, 5.2, 2.2);
+            spot.target = this._lightTarget;
+            spot.castShadow = false;
+            this.scene.add(spot);
+            this._stageSpot = spot;
+        } catch (_) {}
+
+        // 轻雾增强空间感
+        try { this.scene.fog = new THREE.Fog(0x0d0e12, 6, 20); } catch (_) {}
+
+        // 默认保持手动视角，按按钮时再启用自动构图
+    }
+
+    // 确保模型及其子网格投射阴影
+    _ensureShadowsForModel(root) {
+        try {
+            root.traverse(obj => {
+                if (obj && (obj.isMesh || obj.isSkinnedMesh)) {
+                    obj.castShadow = true;
+                    // 只在需要时接收阴影（一般由地面处理）
+                    obj.receiveShadow = false;
+                }
+            });
+        } catch (e) { console.warn('设置模型阴影失败:', e); }
+    }
+
+    // 根据模型包围盒同步地面高度，避免可见地面切割模型
+    _syncGroundWithModel(root) {
+        try {
+            if (!root) return;
+            const bbox = new THREE.Box3().setFromObject(root);
+            if (!bbox || !isFinite(bbox.min.y)) return;
+            // 影子层略高于最低点，可见地面略低于最低点，避免遮挡
+            if (this._ground) this._ground.position.y = bbox.min.y + 0.005;
+            if (this._groundVisible) this._groundVisible.position.y = bbox.min.y - 0.04;
+        } catch (_) {}
+    }
+
+    // 提升标准材质的环境反射，让皮肤/衣服更有层次
+    _enhanceMaterialsForReflections(root) {
+        try {
+            if (!root) return;
+            root.traverse(obj => {
+                const mat = obj && obj.material;
+                if (!mat) return;
+                // 仅对 PBR 标准材质生效，避免破坏 MToon 特性
+                if (mat.isMeshStandardMaterial) {
+                    mat.envMapIntensity = Math.max(mat.envMapIntensity || 0.8, 1.2);
+                    mat.roughness = Math.min(mat.roughness ?? 0.8, 0.85);
+                    mat.metalness = Math.max(mat.metalness ?? 0.0, 0.02);
+                    mat.needsUpdate = true;
+                }
+            });
+        } catch (_) {}
+    }
+
+    // 基于包围盒进行预设构图，确保人物居中且地面不丢失
+    composePortraitView(root) {
+        if (!root || !this.camera) return;
+        try {
+            const bbox = new THREE.Box3().setFromObject(root);
+            const height = (bbox.max.y - bbox.min.y) || 2.0;
+            // 使用真实高度进行取景计算，避免对高个模型发生裁切
+            const h = Math.max(1.0, height);
+            const centerY = (bbox.min.y + bbox.max.y) * 0.5;
+
+            // 预设参数
+            let coverage = 0.62; // half-body 默认覆盖的高度比例
+            let lookRatio = 0.65; // 视线目标在高度中的相对位置（胸口略上）
+            let margin = 0.22;   // 额外边距，保证上下不被裁切
+            switch (this._framePreset) {
+                case 'full':
+                    coverage = 1.0;
+                    lookRatio = 0.6;
+                    margin = 0.15;
+                    break;
+                case 'face':
+                    coverage = 0.38;
+                    lookRatio = 0.72;
+                    margin = 0.30;
+                    break;
+                case 'half':
+                default:
+                    coverage = 0.62;
+                    lookRatio = 0.65;
+                    margin = 0.22;
+                    break;
+            }
+
+            const targetHeight = Math.max(0.8, coverage * h);
+            const fovRad = THREE.MathUtils.degToRad(THREE.MathUtils.clamp(this.camera.fov, 30, 65));
+            let dist = (targetHeight * (1 + margin)) / (2 * Math.tan(fovRad / 2));
+            // 距离上限放宽，避免高模被裁切；下限保留以防过近
+            dist = THREE.MathUtils.clamp(dist, 1.2, 8.0);
+
+            // 目标纵向位置：靠近胸口
+            let lookY = bbox.min.y + lookRatio * h;
+            // 保证非特写时至少对准上半身中心，且略微向下偏移，保证能看到地面一小段
+            const minLookY = bbox.min.y + 0.55 * h;
+            if (this._framePreset !== 'face') lookY = Math.max(lookY, minLookY);
+            const groundBias = (this._framePreset === 'full') ? 0.08 * h : (this._framePreset === 'half') ? 0.12 * h : 0.0;
+            lookY -= groundBias;
+
+            // 为所有预设加入轻微俯视（相机比目标稍高）
+            let pitchY = 0.0;
+            switch (this._framePreset) {
+                case 'full':
+                    pitchY = 0.12 * h; // 全身视角略高一些，利于上俯
+                    break;
+                case 'face':
+                    pitchY = 0.06 * h; // 特写不需要太高，避免夸张变形
+                    break;
+                case 'half':
+                default:
+                    pitchY = 0.10 * h;
+                    break;
+            }
+
+            // 使用平滑过渡：记录目标，由渲染循环渐进
+            const desiredPos = new THREE.Vector3(0, lookY + pitchY, dist);
+            const desiredLook = new THREE.Vector3(0, lookY, 0);
+            this._cameraDesiredPos = desiredPos;
+            this._cameraDesiredLook = desiredLook;
+            if (!this._cameraDesiredInitialized) {
+                this.camera.up.set(0, 1, 0);
+                this.camera.position.copy(desiredPos);
+                if (!this._cameraLookCurrent) this._cameraLookCurrent = new THREE.Vector3();
+                this._cameraLookCurrent.copy(desiredLook);
+                this.camera.lookAt(this._cameraLookCurrent);
+                this.camera.updateProjectionMatrix();
+                this._cameraDesiredInitialized = true;
+            }
+            // 构图更新时，同步地面高度，避免地面切割身体
+            this._syncGroundWithModel(root);
+        } catch (e) { console.warn('composePortraitView 失败:', e); }
+    }
+
+    // 设置取景预设并立即重新构图
+    setFramePreset(preset = 'half') {
+        try {
+            const p = String(preset || '').toLowerCase();
+            if (!['face','half','full'].includes(p)) {
+                console.warn('未知的取景预设:', preset);
+                return false;
+            }
+            this._framePreset = p;
+            this._autoCompose = true; // 启用自动构图以随窗口变化保持画面
+            const root = this.currentModel && (this.currentModel.scene || this.currentModel);
+            if (root) this.composePortraitView(root);
+            return true;
+        } catch (e) {
+            console.warn('设置取景预设失败:', e);
+            return false;
+        }
+    }
+
     // 初始化Three.js渲染环境
     async initThree(canvasId, containerId, options = {}) {
         if (this.isInitialized) {
@@ -80,17 +654,27 @@ class VRMManager {
         // 创建场景
         this.scene = new THREE.Scene();
         this.scene.background = null; // 透明背景
+
+        // 背景专用场景（用于普通2D图片做背景，并支持缩放参数）
+        this._bgScene = new THREE.Scene();
+        this._bgCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+        // 全屏面片 (-1..1 NDC)
+        const bgGeo = new THREE.PlaneGeometry(2, 2);
+        const bgMat = new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0 });
+        this._bgQuad = new THREE.Mesh(bgGeo, bgMat);
+        this._bgQuad.frustumCulled = false; // 始终渲染
+        this._bgScene.add(this._bgQuad);
         
         // 创建相机
         this.camera = new THREE.PerspectiveCamera(
-            30, // 视野角度
+            35, // 视野角度（恢复更自然的半身视角）
             cw / ch, // 宽高比
             0.1, // 近裁剪面
             20 // 远裁剪面
         );
-// 设置相机位置和朝向
-        this.camera.position.set(0, 0, 2.5); // 相机位置
-        this.camera.lookAt(0, -0.2, 0); // 相机朝向模型中心偏下
+        // 设置相机位置和朝向（恢复旧的固定视角）
+        this.camera.position.set(0, 0.6, 2.2);
+        this.camera.lookAt(0, -0.8, 0);
         
         // 创建渲染器
         this.renderer = new THREE.WebGLRenderer({
@@ -106,10 +690,17 @@ class VRMManager {
         this.renderer.setSize(cw, ch);
         this.renderer.setPixelRatio(window.devicePixelRatio);
         this.renderer.setClearColor(0x000000, 0); // 设置透明背景
+        this.renderer.autoClear = false; // 我们将先渲染背景场景，再渲染主场景
         // 色彩空间与物理光照（three r160+ 使用 outputColorSpace）
         if (this.renderer.outputColorSpace !== undefined) {
-            this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+            // 固定为线性 SRGB 输出，避免默认 sRGB 影响外观一致性
+            this.renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
         }
+        // 默认线性色调映射
+        try {
+            this.renderer.toneMapping = THREE.LinearToneMapping;
+            this.renderer.toneMappingExposure = 1.0;
+        } catch (_) {}
         this.renderer.physicallyCorrectLights = true;
         
         console.log('VRM渲染器初始化完成，容器大小:', cw, 'x', ch);
@@ -131,28 +722,27 @@ class VRMManager {
             canvas.addEventListener('webglcontextlost', onContextLost, false);
             canvas.addEventListener('webglcontextrestored', onContextRestored, false);
         } catch (e) { console.warn('绑定 WebGL 上下文事件失败:', e); }
+
+        // 监听窗口尺寸变化，更新渲染器与2D背景缩放
+        const onResize = () => {
+            try {
+                const w = container.clientWidth || cw;
+                const h = container.clientHeight || ch;
+                this.renderer.setSize(w, h);
+                this.camera.aspect = w / h;
+                this.camera.updateProjectionMatrix();
+                this._update2DBackgroundScale();
+                // 窗口变化后重新构图，保持人物居中
+                if (this._autoCompose && this.currentModel && (this.currentModel.scene || this.currentModel)) {
+                    const root = this.currentModel.scene || this.currentModel;
+                    this.composePortraitView(root);
+                }
+            } catch (e) { console.warn('窗口尺寸更新失败:', e?.message || e); }
+        };
+        try { window.addEventListener('resize', onResize); } catch (e) { console.warn('绑定窗口resize失败:', e); }
         
-        // 添加更好的灯光配置
-        // 主光源 - 模拟太阳光
-        const directionalLight = new THREE.DirectionalLight(0xffffff, 1.2);
-        directionalLight.position.set(1, 1, 1);
-        directionalLight.castShadow = true;
-        this.scene.add(directionalLight);
-        
-        // 环境光 - 提供基础照明
-        const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
-        this.scene.add(ambientLight);
-        
-        // 补光 - 从另一个角度照亮模型
-        const fillLight = new THREE.DirectionalLight(0xffffff, 0.4);
-        fillLight.position.set(-1, 0.5, -1);
-        this.scene.add(fillLight);
-        
-        // 启用渲染器的阴影和色调映射
-        this.renderer.shadowMap.enabled = true;
-        this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-        this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-        this.renderer.toneMappingExposure = 1.0;
+        // 应用 three.js 示例风格的灯光与阴影、地面等预设
+        this.applyThreeExamplePreset();
         
         // 创建时钟用于动画
         this.clock = new THREE.Clock();
@@ -177,10 +767,10 @@ class VRMManager {
     enableDrag(enabled = true) {
         this.dragEnabled = !!enabled;
         if (!this.canvasEl || !this.camera) return;
-        // 当启用拖拽时允许鼠标事件落到画布与容器
-        try { this.canvasEl.style.pointerEvents = this.dragEnabled ? 'auto' : 'none'; } catch (_) {}
+        // 始终允许指针事件穿透到画布，拖拽逻辑内部受 dragEnabled 控制
+        try { this.canvasEl.style.pointerEvents = 'auto'; } catch (_) {}
         try {
-            if (this.containerEl) this.containerEl.style.pointerEvents = this.dragEnabled ? 'auto' : 'none';
+            if (this.containerEl) this.containerEl.style.pointerEvents = 'auto';
         } catch (_) {}
 
         // 初始化一次事件绑定
@@ -300,6 +890,33 @@ class VRMManager {
             if (this.currentModel) {
                 // 更新VRM模型（包括SpringBone物理系统）
                 this.currentModel.update(delta);
+                // 每帧强制校正 SpringBone 的引用中心与重力，防止库在内部重置造成漂移
+                try {
+                    const vrm = this.currentModel;
+                    const mgr = vrm && vrm.springBoneManager;
+                    if (mgr) {
+                        // 重力始终指向世界-Y（避免随中心旋转而产生前向分量）
+                        const gdir = new THREE.Vector3(0, -1, 0);
+                        if (!this._noGravityTest && this._forceSpringGravity) {
+                            if (typeof mgr.setGravity === 'function') mgr.setGravity(gdir);
+                            else if (mgr.gravity && typeof mgr.gravity.copy === 'function') mgr.gravity.copy(gdir);
+                        }
+                        // 强制中心为稳定节点（hips 或模型根），避免头部动画影响重力方向
+                        if (this._forceSpringCenter) {
+                            if (!this._springCenterNode) {
+                                try {
+                                    const hum = vrm.humanoid;
+                                    this._springCenterNode = hum?.getNormalizedBoneNode?.('hips') || vrm.scene || null;
+                                } catch (_) { this._springCenterNode = vrm.scene || null; }
+                            }
+                            if (this._springCenterNode && mgr.center !== this._springCenterNode) {
+                                try { mgr.center = this._springCenterNode; } catch (_) {}
+                            }
+                        }
+                    }
+                } catch (_) {}
+                // 当模型不带物理时，对头发骨骼做轻量下垂补偿（仅在无物理模式启用时）
+                try { if (this._noPhysicsHairEnabled) this._updateNoPhysicsHair(delta); } catch (_) {}
                 this.updateFacialExpressions();
                 
                 // 安全检查：防止根节点被动画驱动到异常位置
@@ -329,10 +946,47 @@ class VRMManager {
             if (this._manualAnim) {
                 try { this._updateManualAnimation(delta); } catch (_) {}
             }
+
+            // 相机平滑插值
+            try {
+                if (this._cameraDesiredPos && this.camera) {
+                    const t = 1 - Math.exp(-this._cameraLerpSpeed * delta);
+                    this.camera.position.lerp(this._cameraDesiredPos, t);
+                }
+                if (this._cameraDesiredLook && this.camera) {
+                    if (!this._cameraLookCurrent) this._cameraLookCurrent = this._cameraDesiredLook.clone();
+                    const t2 = 1 - Math.exp(-this._cameraLerpSpeed * delta);
+                    this._cameraLookCurrent.lerp(this._cameraDesiredLook, t2);
+                    this.camera.lookAt(this._cameraLookCurrent);
+                }
+            } catch (_) {}
             
-            // 渲染场景
+            // 渲染场景：先绘制背景，再绘制主场景
+            // 当既没有 3D 背景（scene.background=null）也没有 2D 背景（_bgQuad 不可见）时，
+            // 在 autoClear=false 的模式下临时启用 autoClear，以触发 Three 的标准背景清理流程，避免白屏。
+            let _tempAutoClear = false;
+            try {
+                const has3DBackground = !!this.scene.background;
+                const has2DBackground = !!(this._bgQuad && this._bgQuad.material && this._bgQuad.material.map && this._bgQuad.material.opacity > 0.01);
+                if (!has3DBackground && !has2DBackground) {
+                    // 透明背景清理交由 Three 本身处理（背景模块会正确设置 color/depth 写掩码）
+                    try { this.renderer.setClearAlpha?.(0); } catch (_) {}
+                    this.renderer.setClearColor(0x000000, 0);
+                    const prev = this.renderer.autoClear;
+                    this.renderer.autoClear = true;
+                    _tempAutoClear = true;
+                    // 后续的 render(_bgScene) 将触发背景模块的清屏与状态重置
+                }
+            } catch (_) {}
             try { if (this.currentModel && this.currentModel.scene && this.currentModel.scene.visible === false) this.currentModel.scene.visible = true; } catch (_) {}
+            // 仅清除深度（若刚刚启用了 autoClear，背景模块已清过颜色与深度，这里仍可安全执行）
+            try { this.renderer.clearDepth(); } catch (_) {}
+            // 背景场景（若设置了2D背景纹理则可见）
+            try { this.renderer.render(this._bgScene, this._bgCamera); } catch (_) {}
+            // 主场景
             this.renderer.render(this.scene, this.camera);
+            // 恢复临时 autoClear
+            try { if (_tempAutoClear) this.renderer.autoClear = false; } catch (_) {}
             
             // 调试信息：每100帧输出一次场景状态
             if (Math.floor(Date.now() / 1000) % 10 === 0 && Math.floor(Date.now() / 100) % 10 === 0) {
@@ -350,6 +1004,125 @@ class VRMManager {
             cancelAnimationFrame(this._animationFrameId);
             this._animationFrameId = null;
         }
+    }
+
+    // 舞台/相机调节接口
+    setLightIntensities({ key = null, fill = null, rim = null } = {}) {
+        try {
+            if (key !== null && this._keyLight) this._keyLight.intensity = key;
+            if (fill !== null && this._fillLight) this._fillLight.intensity = fill;
+            if (rim !== null && this._rimLight) this._rimLight.intensity = rim;
+            if (typeof arguments[0]?.hemi !== 'undefined' && this._hemiLight) {
+                const hemi = arguments[0].hemi;
+                if (hemi !== null) this._hemiLight.intensity = hemi;
+            }
+            return true;
+        } catch (_) { return false; }
+    }
+
+    setShadowOpacity(opacity = 0.3) {
+        try {
+            if (this._ground && this._ground.material && typeof this._ground.material.opacity === 'number') {
+                this._ground.material.opacity = THREE.MathUtils.clamp(opacity, 0.0, 1.0);
+                return true;
+            }
+        } catch (_) {}
+        return false;
+    }
+
+    setCameraSmooth(speed = 4.0) {
+        try { this._cameraLerpSpeed = Math.max(0.1, Number(speed) || 4.0); return true; } catch (_) { return false; }
+    }
+
+    toggleGround(show = true) {
+        try {
+            const visibleGround = this.scene.children.find(o => o.isMesh && o.material && o.material.color && o !== this._ground);
+            if (visibleGround) visibleGround.visible = !!show;
+            if (this._ground) this._ground.visible = !!show;
+            return true;
+        } catch (_) { return false; }
+    }
+
+    // 采集当前“美观参数”，用于保存到偏好
+    _getCurrentAestheticParameters() {
+        try {
+            const tm = this.renderer?.toneMapping;
+            const tmName = tm === THREE.ACESFilmicToneMapping ? 'ACESFilmicToneMapping' : (tm === THREE.ReinhardToneMapping ? 'ReinhardToneMapping' : 'LinearToneMapping');
+            const oc = this.renderer?.outputColorSpace;
+            const ocName = oc === THREE.SRGBColorSpace ? 'SRGBColorSpace' : 'LinearSRGBColorSpace';
+            const shadowOpacity = (this._ground && this._ground.material && typeof this._ground.material.opacity === 'number') ? this._ground.material.opacity : null;
+            const lights = {
+                key: this._keyLight?.intensity ?? null,
+                fill: this._fillLight?.intensity ?? null,
+                rim: this._rimLight?.intensity ?? null,
+                hemi: this._hemiLight?.intensity ?? null
+            };
+            return {
+                toneMapping: tmName,
+                outputColorSpace: ocName,
+                shadowOpacity,
+                lights,
+                framePreset: this._framePreset,
+                groundVisible: !!this._ground?.visible,
+                environment_url: this._environmentUrl || null,
+                use_hdr_background: !!this._useHDRBackground
+            };
+        } catch (_) {
+            return {};
+        }
+    }
+
+    // 应用“美观参数”，从偏好恢复外观
+    _applyAestheticParameters(aesthetic = {}) {
+        try {
+            if (!aesthetic || typeof aesthetic !== 'object') return false;
+            const { toneMapping, outputColorSpace, shadowOpacity, lights, framePreset, groundVisible, environment_url, use_hdr_background } = aesthetic;
+            // tone mapping
+            if (toneMapping) {
+                const tmMap = {
+                    'ACESFilmicToneMapping': THREE.ACESFilmicToneMapping,
+                    'ReinhardToneMapping': THREE.ReinhardToneMapping,
+                    'LinearToneMapping': THREE.LinearToneMapping
+                };
+                if (tmMap[toneMapping] !== undefined) {
+                    this.renderer.toneMapping = tmMap[toneMapping];
+                }
+            }
+            // color space
+            if (outputColorSpace && this.renderer.outputColorSpace !== undefined) {
+                const ocMap = {
+                    'SRGBColorSpace': THREE.SRGBColorSpace,
+                    'LinearSRGBColorSpace': THREE.LinearSRGBColorSpace
+                };
+                if (ocMap[outputColorSpace] !== undefined) {
+                    this.renderer.outputColorSpace = ocMap[outputColorSpace];
+                }
+            }
+            // lights
+            if (lights && typeof lights === 'object') {
+                this.setLightIntensities({
+                    key: lights.key ?? null,
+                    fill: lights.fill ?? null,
+                    rim: lights.rim ?? null,
+                    hemi: lights.hemi ?? null
+                });
+            }
+            // shadow opacity
+            if (typeof shadowOpacity === 'number') this.setShadowOpacity(shadowOpacity);
+            // ground visible
+            if (typeof groundVisible === 'boolean') this.toggleGround(groundVisible);
+            // frame preset
+            if (typeof framePreset === 'string') this.setFramePreset(framePreset);
+            // environment
+            if (typeof environment_url === 'string' && environment_url.length > 0) {
+                this.setEnvironmentHDR(environment_url);
+            }
+            // hdr background toggle
+            if (typeof use_hdr_background === 'boolean') {
+                this.useHDRBackground(use_hdr_background);
+            }
+            return true;
+        } catch (e) { console.warn('应用美观参数失败:', e?.message || e); return false; }
     }
 
     // 设置HDR环境贴图（若存在RGBELoader）
@@ -380,14 +1153,29 @@ class VRMManager {
                     const loader = new RGBELoaderCtor();
                     const tex = await loader.loadAsync(url);
                     tex.mapping = THREE.EquirectangularReflectionMapping;
-                    // 背景显示
-                    this.scene.background = tex;
-                    // 环境反射/光照
-                    const envMap = pmrem.fromEquirectangular(tex).texture;
-                    this.scene.environment = envMap;
+                    // 直接将等距纹理作为背景，PMREM 仅用于环境光照，避免 CubeUV Infinity 错误
+                    const envRT = pmrem.fromEquirectangular(tex);
+                    // 防护：修正 PMREM 生成纹理的 image.height 异常，避免 GLSL 定义出现 Infinity/NaN
+                    try {
+                        const envTex = envRT.texture;
+                        const img = envTex.image || {};
+                        const h = Number(img.height || 0);
+                        if (!isFinite(h) || h <= 0) {
+                            img.height = 256; // 设为安全默认值（2^8），保证 CUBEUV_MAX_MIP 合法
+                            envTex.image = img;
+                            envTex.needsUpdate = true;
+                        }
+                    } catch (_) {}
+                    // 仅应用环境光，不设置 3D 背景，避免模型在某些设备下被背景流程影响
+                    this.scene.background = null;
+                    this.scene.environment = envRT.texture;
                     this._hdrBackgroundTexture = tex;
+                    this._environmentUrl = url;
+                    try { tex.needsUpdate = true; } catch (_) {}
                     pmrem.dispose();
-                    console.log('HDR环境贴图已应用:', url);
+                    // 保持透明清屏，由渲染循环按需清理
+                    try { this.renderer.setClearColor(0x000000, 0); } catch (_) {}
+                    console.log('HDR环境光已应用（未设置3D背景）:', url);
                     return true;
                 } else {
                     console.warn('未发现或无法加载RGBELoader，HDR加载不可用。请放置RGBELoader.js到/static/libs/jsm/loaders/或使用JPG/PNG背景。');
@@ -395,15 +1183,57 @@ class VRMManager {
                     return false;
                 }
             } else {
-                // 非HDR（JPG/PNG等）：使用TextureLoader作为背景，并生成环境贴图
+                // 非HDR（JPG/PNG等）：加载纹理
                 const tex = await new THREE.TextureLoader().loadAsync(url);
-                tex.mapping = THREE.EquirectangularReflectionMapping;
-                this.scene.background = tex;
-                const envMap = pmrem.fromEquirectangular(tex).texture;
-                this.scene.environment = envMap;
-                this._hdrBackgroundTexture = tex;
-                pmrem.dispose();
-                console.log('LDR背景已应用并用于环境光照:', url);
+                // 判别是否为等距全景（宽高比约 2:1 视为等距）
+                const isEquirect = tex.image && tex.image.width && tex.image.height && Math.abs((tex.image.width / tex.image.height) - 2.0) < 0.2;
+                try { tex.colorSpace = THREE.SRGBColorSpace; } catch (_) {}
+                tex.needsUpdate = true;
+
+                if (isEquirect) {
+                    // 等距图像：直接作为背景，PMREM 结果用于环境光照
+                    tex.mapping = THREE.EquirectangularReflectionMapping;
+                    const envRT = pmrem.fromEquirectangular(tex);
+                    // 防护：修正 PMREM 生成纹理的 image.height 异常，避免 GLSL 定义出现 Infinity/NaN
+                    try {
+                        const envTex = envRT.texture;
+                        const img = envTex.image || {};
+                        const h = Number(img.height || 0);
+                        if (!isFinite(h) || h <= 0) {
+                            img.height = 256;
+                            envTex.image = img;
+                            envTex.needsUpdate = true;
+                        }
+                    } catch (_) {}
+                    // 仅应用环境光，不设置 3D 背景
+                    this.scene.background = null;
+                    this.scene.environment = envRT.texture;
+                    this._hdrBackgroundTexture = tex;
+                    pmrem.dispose();
+                    try { this.renderer.setClearColor(0x000000, 0); } catch (_) {}
+                    console.log('等距LDR环境光已应用（未设置3D背景）:', url);
+                } else {
+                    // 普通照片：用2D背景平面显示，避免被当作环境贴图导致拉伸和模糊
+                    this._set2DBackgroundTexture(tex, { mode: 'cover' });
+                    // 同时生成环境光用的 PMREM（可选）
+                    const envRT = pmrem.fromEquirectangular(tex);
+                    // 防护：修正 PMREM 生成纹理的 image.height 异常
+                    try {
+                        const envTex = envRT.texture;
+                        const img = envTex.image || {};
+                        const h = Number(img.height || 0);
+                        if (!isFinite(h) || h <= 0) {
+                            img.height = 256;
+                            envTex.image = img;
+                            envTex.needsUpdate = true;
+                        }
+                    } catch (_) {}
+                    const envMap = envRT.texture;
+                    this.scene.environment = envMap;
+                    this._hdrBackgroundTexture = tex;
+                    pmrem.dispose();
+                    console.log('2D图片作为背景已应用（cover），并生成环境光:', url);
+                }
                 return true;
             }
         } catch (e) {
@@ -444,24 +1274,82 @@ class VRMManager {
                 const loader = new RGBELoaderCtor();
                 const tex = loader.parse(buffer);
                 tex.mapping = THREE.EquirectangularReflectionMapping;
-                this.scene.background = tex;
-                const envMap = pmrem.fromEquirectangular(tex).texture;
-                this.scene.environment = envMap;
+                // 背景使用原始等距纹理，PMREM 结果用于环境光照
+                const envRT = pmrem.fromEquirectangular(tex);
+                // 防护：修正 PMREM 生成纹理的 image.height 异常
+                try {
+                    const envTex = envRT.texture;
+                    const img = envTex.image || {};
+                    const h = Number(img.height || 0);
+                    if (!isFinite(h) || h <= 0) {
+                        img.height = 256;
+                        envTex.image = img;
+                        envTex.needsUpdate = true;
+                    }
+                } catch (_) {}
+                // 仅应用环境光，不设置 3D 背景
+                this.scene.background = null;
+                this.scene.environment = envRT.texture;
                 this._hdrBackgroundTexture = tex;
                 pmrem.dispose();
-                console.log('HDR文件环境已应用:', name);
+                try { this.renderer.setClearColor(0x000000, 0); } catch (_) {}
+                console.log('HDR文件环境光已应用（未设置3D背景）:', name);
                 return true;
             } else {
                 const objectUrl = URL.createObjectURL(file);
                 const tex = await new THREE.TextureLoader().loadAsync(objectUrl);
                 URL.revokeObjectURL(objectUrl);
-                tex.mapping = THREE.EquirectangularReflectionMapping;
-                this.scene.background = tex;
-                const envMap = pmrem.fromEquirectangular(tex).texture;
-                this.scene.environment = envMap;
-                this._hdrBackgroundTexture = tex;
-                pmrem.dispose();
-                console.log('LDR文件背景已应用并用于环境光照:', name);
+                try {
+                    tex.colorSpace = THREE.SRGBColorSpace;
+                    tex.magFilter = THREE.LinearFilter;
+                    tex.minFilter = THREE.LinearMipmapLinearFilter;
+                    tex.anisotropy = this.renderer.capabilities?.getMaxAnisotropy?.() || 1;
+                    tex.needsUpdate = true;
+                } catch (_) {}
+                const isEquirect = tex.image && tex.image.width && tex.image.height && Math.abs((tex.image.width / tex.image.height) - 2.0) < 0.2;
+                if (isEquirect) {
+                    tex.mapping = THREE.EquirectangularReflectionMapping;
+                    // 等距 LDR：仅应用环境光，不设置 3D 背景
+                    const envRT = pmrem.fromEquirectangular(tex);
+                    // 防护：修正 PMREM 生成纹理的 image.height 异常
+                    try {
+                        const envTex = envRT.texture;
+                        const img = envTex.image || {};
+                        const h = Number(img.height || 0);
+                        if (!isFinite(h) || h <= 0) {
+                            img.height = 256;
+                            envTex.image = img;
+                            envTex.needsUpdate = true;
+                        }
+                    } catch (_) {}
+                    const envMap = envRT.texture;
+                    this.scene.background = null;
+                    this.scene.environment = envMap;
+                    this._hdrBackgroundTexture = tex;
+                    pmrem.dispose();
+                    try { this.renderer.setClearColor(0x000000, 0); } catch (_) {}
+                    console.log('等距LDR文件环境光已应用（未设置3D背景）:', name);
+                } else {
+                    this._set2DBackgroundTexture(tex, { mode: 'cover' });
+                    const envRT = pmrem.fromEquirectangular(tex);
+                    // 防护：修正 PMREM 生成纹理的 image.height 异常
+                    try {
+                        const envTex = envRT.texture;
+                        const img = envTex.image || {};
+                        const h = Number(img.height || 0);
+                        if (!isFinite(h) || h <= 0) {
+                            img.height = 256;
+                            envTex.image = img;
+                            envTex.needsUpdate = true;
+                        }
+                    } catch (_) {}
+                    const envMap = envRT.texture;
+                    this.scene.environment = envMap;
+                    this._hdrBackgroundTexture = tex;
+                    pmrem.dispose();
+                    console.log('普通LDR文件作为2D背景已应用（cover），并用于环境光照:', name);
+                }
+                try { this.renderer.setClearColor(0x000000, 1); } catch (_) {}
                 return true;
             }
         } catch (e) {
@@ -479,6 +1367,107 @@ class VRMManager {
         this.scene.environment = envMap;
         pmrem.dispose();
         return true;
+    }
+
+    // 使用2D纹理作为背景（通过全屏面片），支持缩放模式
+    _set2DBackgroundTexture(tex, { mode = 'cover' } = {}) {
+        if (!this._bgQuad) return;
+        const mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity: 1 });
+        mat.depthTest = false;
+        mat.depthWrite = false;
+        this._bgQuad.material = mat;
+        this._bgMode = mode;
+        this._update2DBackgroundScale();
+    }
+
+    // 根据容器尺寸与纹理尺寸，计算cover/contain缩放
+    _update2DBackgroundScale() {
+        if (!this._bgQuad || !this.containerEl) return;
+        const tex = this._bgQuad.material && this._bgQuad.material.map;
+        if (!tex || !tex.image) return;
+        const iw = tex.image.width || 1;
+        const ih = tex.image.height || 1;
+        const vw = this.containerEl.clientWidth || 1;
+        const vh = this.containerEl.clientHeight || 1;
+        const imgAR = iw / ih;
+        const viewAR = vw / vh;
+        let sx = 1, sy = 1;
+        if (this._bgMode === 'contain') {
+            if (imgAR > viewAR) { // 图片更宽，按宽度适配
+                sx = 1;
+                sy = viewAR / imgAR;
+            } else { // 图片更高，按高度适配
+                sx = imgAR / viewAR;
+                sy = 1;
+            }
+        } else { // cover
+            if (imgAR > viewAR) { // 图片更宽，按高度填满
+                sx = imgAR / viewAR;
+                sy = 1;
+            } else { // 图片更高，按宽度填满
+                sx = 1;
+                sy = viewAR / imgAR;
+            }
+        }
+        this._bgQuad.scale.set(sx, sy, 1);
+    }
+
+    // 对外暴露：设置2D背景的缩放模式（'cover' 或 'contain'）
+    setBackgroundScaleMode(mode = 'cover') {
+        this._bgMode = mode === 'contain' ? 'contain' : 'cover';
+        this._update2DBackgroundScale();
+    }
+
+    // 对外暴露：清除环境与背景（包括2D背景平面）
+    clearEnvironment() {
+        try {
+            if (this.scene) {
+                this.scene.environment = null;
+                this.scene.background = null;
+            }
+            if (this._bgQuad && this._bgQuad.material) {
+                this._bgQuad.material.map = null;
+                this._bgQuad.material.opacity = 0; // 隐藏2D背景
+                this._bgQuad.material.needsUpdate = true;
+            }
+            if (this._hdrBackgroundTexture) {
+                try { this._hdrBackgroundTexture.dispose?.(); } catch (_) {}
+                this._hdrBackgroundTexture = null;
+            }
+            this.renderer?.setClearColor(0x000000, 0);
+        } catch (e) { console.warn('清除环境失败:', e?.message || e); }
+    }
+
+    // 启用/关闭：将已加载的 HDR/等距纹理作为 3D 背景绘制
+    useHDRBackground(enable = true) {
+        try {
+            if (!this.scene || !this.renderer) return false;
+            if (enable) {
+                if (!this._hdrBackgroundTexture) {
+                    console.warn('未检测到已加载的 HDR/等距纹理，先调用 setEnvironmentHDR()/setEnvironmentFile()');
+                    return false;
+                }
+                try { this._hdrBackgroundTexture.mapping = THREE.EquirectangularReflectionMapping; } catch (_) {}
+                this.scene.background = this._hdrBackgroundTexture;
+                try {
+                    this.scene.backgroundIntensity = 1.0;
+                    this.scene.backgroundBlurriness = 0.0;
+                } catch (_) {}
+                try { this.renderer.setClearColor(0x000000, 0); } catch (_) {}
+                console.log('HDR/等距纹理 3D 背景已启用');
+                this._useHDRBackground = true;
+                return true;
+            } else {
+                this.scene.background = null;
+                try { this.renderer.setClearColor(0x000000, 0); } catch (_) {}
+                console.log('HDR/等距纹理 3D 背景已关闭');
+                this._useHDRBackground = false;
+                return true;
+            }
+        } catch (e) {
+            console.warn('切换 HDR 背景失败:', e?.message || e);
+            return false;
+        }
     }
     
     // 加载VRM模型
@@ -514,6 +1503,55 @@ class VRMManager {
             console.log('VRMLoaderPlugin 选择来源:',
                 window.VRMLoaderPluginModule ? 'ESM(importmap)' : (window.VRMLoaderPlugin ? 'UMD(window.VRMLoaderPlugin)' : 'THREE.VRMLoaderPlugin/THREE.VRM.VRMLoaderPlugin'));
 
+            // 在 VRM 插件之前注册一个表达式清理插件，避免 three-vrm 在导入表达式时因异常绑定报错
+            try {
+                loader.register((parser) => ({
+                    name: 'VRMExpressionSanitizer',
+                    beforeRoot: async () => {
+                        const json = parser.json || {};
+                        const ext = json.extensions || {};
+                        const vrmc = ext.VRMC_vrm || ext.VRM || null;
+                        if (!vrmc || !vrmc.expressions) return;
+                        const nodes = json.nodes || [];
+                        const meshes = json.meshes || [];
+                        let removed = 0, checked = 0;
+                        const sanitizeBinds = (exprObj) => {
+                            if (!exprObj) return;
+                            const arrs = ['morphTargetBinds', 'morphTargetBindsVrm0'];
+                            for (const key of arrs) {
+                                const binds = exprObj[key];
+                                if (!Array.isArray(binds)) continue;
+                                const kept = [];
+                                for (const b of binds) {
+                                    checked++;
+                                    const nodeIndex = (b?.node !== undefined) ? b.node : b?.nodeIndex;
+                                    const node = (nodeIndex !== undefined) ? nodes[nodeIndex] : null;
+                                    const meshIndex = node && (node.mesh !== undefined) ? node.mesh : null;
+                                    const mesh = (meshIndex !== null && meshIndex !== undefined) ? meshes[meshIndex] : null;
+                                    const primitives = mesh?.primitives || null;
+                                    if (Array.isArray(primitives) && primitives.length > 0) {
+                                        kept.push(b);
+                                    } else {
+                                        removed++;
+                                    }
+                                }
+                                exprObj[key] = kept;
+                            }
+                        };
+                        // 处理 preset 与 custom 两块
+                        const preset = vrmc.expressions.preset || {};
+                        Object.values(preset).forEach(sanitizeBinds);
+                        const custom = vrmc.expressions.custom || {};
+                        Object.values(custom).forEach(sanitizeBinds);
+                        if (removed > 0) {
+                            console.warn(`VRMExpressionSanitizer: 移除了 ${removed}/${checked} 个无效的 morphTarget 绑定，避免导入报错`);
+                        }
+                    },
+                }));
+            } catch (e) {
+                console.warn('注册 VRM 表达式清理插件失败：', e);
+            }
+
             // 尝试添加VRM插件；若缺失则以GLTF场景回退
             if (hasVRMPlugin && typeof loader.register === 'function') {
                 loader.register((parser) => new VRMLoaderPluginCtor(parser));
@@ -539,6 +1577,25 @@ class VRMManager {
                     (error) => reject(error)
                 );
             });
+            // 保存最近一次加载的 GLTF 与解析 JSON，用于调试
+            try {
+                this._lastGltf = gltf;
+                this._lastGltfJson = (gltf && gltf.parser && gltf.parser.json) ? gltf.parser.json : null;
+            } catch (_) { this._lastGltf = null; this._lastGltfJson = null; }
+            // 若解析器未提供 json，尝试从 GLB 直接解析 JSON chunk 兜底
+            if (!this._lastGltfJson) {
+                try {
+                    this._lastGltfJson = await this._fetchGlbJson(modelPath);
+                    if (this._lastGltfJson) {
+                        const exKeys = Object.keys(this._lastGltfJson.extensions || {});
+                        console.log('兜底解析 GLB JSON 成功，扩展 keys:', exKeys);
+                    } else {
+                        console.warn('兜底解析 GLB JSON 失败或无扩展');
+                    }
+                } catch (e) {
+                    console.warn('兜底解析 GLB JSON 异常:', e);
+                }
+            }
             
             // 获取VRM模型（可能不存在，需做GLTF回退）
             let vrm = gltf && gltf.userData ? gltf.userData.vrm : null;
@@ -570,8 +1627,47 @@ class VRMManager {
                 sceneNode.scale.set(0.7, 0.7, 0.7);
                 sceneNode.visible = true;
 
+                // 面向相机 & 阴影（默认正向，不再强制旋转 180°）
+                try { sceneNode.rotation.y = 0; } catch (_) {}
+                this._ensureShadowsForModel(sceneNode);
+                this._enhanceMaterialsForReflections(sceneNode);
+
+                // 根据模型包围盒同步地面高度
+                try {
+                    this._syncGroundWithModel(sceneNode);
+                    if (this._autoCompose) this.composePortraitView(sceneNode);
+                } catch (_) {}
+
                 console.log('GLTF场景已添加到场景（VRM回退），位置:', sceneNode.position, '缩放:', sceneNode.scale);
                 console.log('场景中的对象数量:', this.scene.children.length);
+
+                // 尝试应用用户偏好（位置/缩放/美观参数）
+                try {
+                    const allPrefs = await this.loadUserPreferences();
+                    const prefer = Array.isArray(allPrefs)
+                        ? allPrefs.find(p => {
+                            const mp = String(p?.model_path || '');
+                            return mp === String(this.modelUrl) ||
+                                   (this.modelName && mp.endsWith(this.modelName + '.vrm'));
+                        })
+                        : null;
+                    if (prefer) {
+                        if (prefer.position && typeof prefer.position === 'object') {
+                            const pos = prefer.position;
+                            sceneNode.position.set(Number(pos.x) || 0, Number(pos.y) || 0, Number(pos.z) || 0);
+                        }
+                        if (prefer.scale !== undefined && prefer.scale !== null) {
+                            const s = Number(prefer.scale);
+                            if (!Number.isNaN(s) && s > 0) {
+                                sceneNode.scale.set(s, s, s);
+                            }
+                        }
+                        if (prefer.aesthetic) {
+                            try { this._applyAestheticParameters(prefer.aesthetic || {}); } catch (_) {}
+                        }
+                        console.log('已应用保存的用户偏好到GLTF场景');
+                    }
+                } catch (e) { console.warn('应用用户偏好失败(GLTF):', e); }
 
                 // GLTF动画支持（若存在动画片段）
                 if (gltf.animations && gltf.animations.length) {
@@ -603,8 +1699,26 @@ class VRMManager {
             }
 
             // 设置模型位置和缩放（更合适的默认展示）
-            vrm.scene.position.set(0, -1.4, 0);
+            vrm.scene.position.set(0, 0, 0);
             vrm.scene.scale.set(0.7, 0.7, 0.7);
+
+            // 面向相机 & 阴影（默认正向，不再强制旋转 180°）
+            try { vrm.scene.rotation.y = 0; } catch (_) {}
+            this._ensureShadowsForModel(vrm.scene);
+            this._enhanceMaterialsForReflections(vrm.scene);
+
+            // 根据模型包围盒同步地面高度，并刷新灯光 target
+            try {
+                const bbox = new THREE.Box3().setFromObject(vrm.scene);
+                this._syncGroundWithModel(vrm.scene);
+                // 更新灯光 target 到胸口偏上，保证照明稳定
+                try {
+                    const h = (bbox.max.y - bbox.min.y) || 1.8;
+                    const lookY = bbox.min.y + 0.65 * h;
+                    if (this._lightTarget) this._lightTarget.position.set(0, lookY, 0);
+                } catch (_) {}
+                if (this._autoCompose) this.composePortraitView(vrm.scene);
+            } catch (_) {}
 
             // 确保模型可见
             vrm.scene.visible = true;
@@ -629,38 +1743,88 @@ class VRMManager {
             console.log('VRM模型已添加到场景，位置:', vrm.scene.position, '缩放:', vrm.scene.scale);
             console.log('场景中的对象数量:', this.scene.children.length);
 
+            // 尝试应用用户偏好（位置/缩放/美观参数）
+            try {
+                const allPrefs = await this.loadUserPreferences();
+                const prefer = Array.isArray(allPrefs)
+                    ? allPrefs.find(p => {
+                        const mp = String(p?.model_path || '');
+                        return mp === String(this.modelUrl) ||
+                               (this.modelName && mp.endsWith(this.modelName + '.vrm'));
+                    })
+                    : null;
+                if (prefer) {
+                    if (prefer.position && typeof prefer.position === 'object') {
+                        const pos = prefer.position;
+                        vrm.scene.position.set(Number(pos.x) || 0, Number(pos.y) || 0, Number(pos.z) || 0);
+                    }
+                    if (prefer.scale !== undefined && prefer.scale !== null) {
+                        const s = Number(prefer.scale);
+                        if (!Number.isNaN(s) && s > 0) {
+                            vrm.scene.scale.set(s, s, s);
+                        }
+                    }
+                    if (prefer.aesthetic) {
+                        try { this._applyAestheticParameters(prefer.aesthetic || {}); } catch (_) {}
+                    }
+                    console.log('已应用保存的用户偏好到VRM');
+                }
+            } catch (e) { console.warn('应用用户偏好失败(VRM):', e); }
+
             // 启用VRM物理系统（SpringBone）
             if (vrm.springBoneManager) {
                 console.log('启用VRM物理系统');
-                
-                // 检查SpringBone管理器的API版本
-                if (typeof vrm.springBoneManager.setGravity === 'function') {
-                    // 新版本API
-                    vrm.springBoneManager.setGravity(new THREE.Vector3(0, -9.8, 0));
-                } else if (vrm.springBoneManager.gravity) {
-                    // 旧版本API
-                    vrm.springBoneManager.gravity.set(0, -9.8, 0);
-                }
-                
-                // 遍历所有SpringBone节点，优化物理参数
-                const joints = vrm.springBoneManager.joints || vrm.springBoneManager.springBoneGroupList || [];
-                
-                if (Array.isArray(joints)) {
-                    joints.forEach(joint => {
-                        if (joint.settings) {
-                            // 增加阻尼以减少过度摆动
-                            joint.settings.dragForce = Math.max(joint.settings.dragForce || 0.4, 0.4);
-                            // 设置合适的刚性
-                            joint.settings.stiffness = Math.min(joint.settings.stiffness || 1.0, 1.0);
-                            // 设置重力影响
-                            joint.settings.gravityPower = Math.max(joint.settings.gravityPower || 0.2, 0.2);
+                // 保留模型自带的物理参数，不做覆盖；仅设置世界重力方向
+                try {
+                    // 使用单位向量指定重力方向（不同版本在内部会乘以 gravityPower）
+                    const gdir = new THREE.Vector3(0, -1, 0);
+                    if (this._forceSpringGravity) {
+                        if (typeof vrm.springBoneManager.setGravity === 'function') {
+                            vrm.springBoneManager.setGravity(gdir);
+                        } else if (vrm.springBoneManager.gravity) {
+                            vrm.springBoneManager.gravity.copy(gdir);
                         }
-                    });
+                    }
+                    // 调试：记录关节/组数量；某些版本不公开 joints，仅有 groupList
+                    try {
+                        const groups = Array.isArray(vrm.springBoneManager.springBoneGroupList)
+                            ? vrm.springBoneManager.springBoneGroupList
+                            : [];
+                        const jointsCount = Array.isArray(vrm.springBoneManager.joints)
+                            ? vrm.springBoneManager.joints.length
+                            : 0;
+                        const groupCount = groups.length;
+                        console.log(`SpringBone就绪: joints=${jointsCount}, groups=${groupCount}`);
+                        // 如果管理器存在但为空，视为“无物理”，启用轻量下垂补偿
+                        if ((jointsCount === 0) && (groupCount === 0)) {
+                            try { this._setupNoPhysicsHairCompensation(vrm); this._noPhysicsHairEnabled = true; } catch (_) { this._noPhysicsHairEnabled = false; }
+                            console.warn('SpringBone 管理器为空，已启用无物理头发补偿');
+                        } else {
+                            this._noPhysicsHairEnabled = false;
+                        }
+                    } catch (_) { this._noPhysicsHairEnabled = false; }
+                } catch (e) {
+                    console.warn('设置SpringBone重力失败:', e);
                 }
-                
-                console.log('SpringBone物理参数已优化');
+
+                // 针对头发的物理参数微调：提高重力、适度增加阻尼，避免“漂浮”
+                try { if (this._enableHairTuning) this._tuneHairPhysics(vrm.springBoneManager); } catch (_) {}
+
+                // 进一步稳态处理：设置中心与重力方向，缓解“刘海前冲”
+                try { if (this._forceSpringGravity || this._forceSpringCenter) this._stabilizeHairForwardIssue(vrm); } catch (_) {}
+
+                // 无重力测试：将重力置零以验证是否为重力导致问题
+                if (this._noGravityTest) {
+                    console.warn('SpringBone无重力测试模式已开启（临时）');
+                    try { this._applyNoGravityToSpringBones(vrm); } catch (e) { console.warn('应用无重力测试失败:', e); }
+                }
+
+                // 存在物理系统时，关闭无物理头发补偿（若管理器为空，上面已重新开启）
+                if (!this._noPhysicsHairEnabled) this._noPhysicsHairEnabled = false;
             } else {
                 console.warn('VRM模型不包含SpringBone系统');
+                // 无物理系统时，启用轻量下垂补偿
+                try { this._setupNoPhysicsHairCompensation(vrm); this._noPhysicsHairEnabled = true; } catch (_) { this._noPhysicsHairEnabled = false; }
             }
             
             // 设置自然的待机姿态（修复T-pose）
@@ -788,6 +1952,61 @@ class VRMManager {
         
         // 添加轻微的待机姿态调整
         this.addIdlePostureAnimation();
+
+        // 启动默认待机 VRMA（StandingIdle01）循环
+        this.startDefaultIdleAnimation(this._defaultIdleUrl);
+    }
+
+    // 无SpringBone时的头发下垂补偿——轻量骨骼旋转模拟重力
+    _setupNoPhysicsHairCompensation(vrm) {
+        try {
+            const hairKeys = ['hair', 'bang', 'fringe', 'front', 'pony', 'braid', '髪', '发', '刘海'];
+            const bones = [];
+            vrm.scene.traverse(obj => {
+                const nm = String(obj?.name || '').toLowerCase();
+                if (!nm) return;
+                if (hairKeys.some(k => nm.includes(k))) {
+                    // 只记录可旋转的骨骼对象
+                    if (obj && obj.isBone) {
+                        obj.userData.__origQuat = obj.quaternion.clone();
+                        bones.push(obj);
+                    }
+                }
+            });
+            this._noSpringHairBones = bones;
+            console.log('无物理模式：识别到头发骨骼数量=', bones.length);
+        } catch (e) {
+            console.warn('识别头发骨骼失败:', e);
+            this._noSpringHairBones = null;
+        }
+        // 记录头部骨骼用于计算俯仰
+        try {
+            this._noSpringHead = vrm?.humanoid?.getNormalizedBoneNode?.('head') || null;
+        } catch (_) { this._noSpringHead = null; }
+    }
+
+    _updateNoPhysicsHair(delta) {
+        const arr = this._noSpringHairBones;
+        if (!arr || arr.length === 0) return;
+        // 基础下垂角度（弧度）与阻尼
+        const baseDroop = -0.35; // ~ -20°，增强下垂以抵抗前冲
+        const lerp = 1 - Math.exp(-8 * delta); // 更快阻尼，减少前向抬头的惯性
+        let headPitch = 0;
+        try {
+            if (this._noSpringHead) {
+                // 读取头部局部旋转的 X 作为俯仰近似
+                headPitch = this._noSpringHead.rotation?.x || 0;
+            }
+        } catch (_) {}
+        // 根据头部俯仰微调目标角（头部前倾时稍多下垂，后仰时减少）
+        const targetX = baseDroop + Math.max(-0.10, Math.min(0.10, -0.30 * headPitch));
+        for (const b of arr) {
+            try {
+                const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(targetX, 0, 0, 'XYZ'));
+                const target = b.userData.__origQuat ? b.userData.__origQuat.clone().multiply(q) : q;
+                b.quaternion.slerp(target, lerp);
+            } catch (_) {}
+        }
     }
 
     // 加载动画库清单，并预载AnimationClip
@@ -804,8 +2023,8 @@ class VRMManager {
             // 保存动作映射
             this.actionClipMap = manifest.actionMap || {};
 
-            // 使用GLTFLoader预载动画clips（优先 ESM，再回退到全局 THREE/window）
-            const LoaderClass = window.GLTFLoaderModule || window.GLTFLoader || (window.THREE && window.THREE.GLTFLoader);
+            // 使用与当前渲染同源的 THREE 实例的 GLTFLoader，避免多实例导致绑定失败
+            const LoaderClass = (window.THREE && window.THREE.GLTFLoader) || window.GLTFLoader || window.GLTFLoaderModule;
             if (!LoaderClass) throw new Error('GLTFLoader 未就绪');
             const loader = new LoaderClass();
             for (const item of manifest.animations) {
@@ -1047,7 +2266,8 @@ class VRMManager {
             return false;
         }
         try {
-            const LoaderClass = window.GLTFLoader || (window.THREE && window.THREE.GLTFLoader);
+            // 优先使用与当前 THREE 渲染实例一致的 GLTFLoader，避免不同实例导致绑定失败
+            const LoaderClass = (window.THREE && window.THREE.GLTFLoader) || window.GLTFLoader;
             if (!LoaderClass) {
                 console.error('GLTFLoader 未加载，无法导入GLB动画');
                 return false;
@@ -2049,6 +3269,10 @@ class VRMManager {
                 cancelAnimationFrame(this.idleAnimationId);
                 this.idleAnimationId = null;
             }
+            // 淡出默认待机 VRMA
+            if (this.defaultIdleAction) {
+                try { this.defaultIdleAction.fadeOut(0.2); } catch (_) {}
+            }
         } catch (_) {}
     }
 
@@ -2057,7 +3281,81 @@ class VRMManager {
         try {
             this.addVRMBreathingAnimation();
             this.addIdlePostureAnimation();
+            // 恢复默认待机 VRMA 的权重
+            if (this.defaultIdleAction) {
+                try {
+                    this.defaultIdleAction.play();
+                    this.defaultIdleAction.fadeIn(0.2);
+                    if (!this.currentClipAction) {
+                        this.currentClipAction = this.defaultIdleAction;
+                    }
+                } catch (_) {}
+            } else if (this._defaultIdleUrl) {
+                // 若还未初始化，尝试重新启动
+                this.startDefaultIdleAnimation(this._defaultIdleUrl);
+            }
         } catch (_) {}
+    }
+
+    // 启动默认待机 VRMA 循环
+    async startDefaultIdleAnimation(url = '/static/animations/StandingIdle01.vrma') {
+        try {
+            if (!this.currentModel) return;
+            const name = 'default_idle';
+            this.defaultIdleClipName = name;
+            this._defaultIdleUrl = url || this._defaultIdleUrl;
+            // 导入 VRMA，已自动适配 VRM，无需重定向
+            const ok = await this.importVRMA(name, this._defaultIdleUrl, { defaultSpeed: 1.0 });
+            if (!ok) { console.warn('默认待机VRMA导入失败:', this._defaultIdleUrl); return; }
+            // 通过动画库获取 clip 并创建 action
+            const item = this.animationLibrary[name];
+            const clip = item && item.clips && item.clips[0] ? item.clips[0] : null;
+            if (!clip) { console.warn('默认待机clip不存在'); return; }
+            if (!this.mixer) {
+                const root = this.currentModel?.scene || this.scene;
+                this.mixer = new THREE.AnimationMixer(root);
+            }
+            const action = this.mixer.clipAction(clip);
+            action.clampWhenFinished = false;
+            action.setLoop(THREE.LoopRepeat, Infinity);
+            action.setEffectiveWeight(1.0);
+            action.setEffectiveTimeScale(1.0);
+            action.play();
+            this.clipActions[name] = action;
+            this.defaultIdleAction = action;
+            // 设为当前动作，便于后续 crossFade 逻辑
+            this.currentClipAction = action;
+
+            // 启动后做一次绑定检测，若无绑定则尝试重定向并重建 action，避免静止不动
+            try {
+                const stat = this._debugClipBinding(clip);
+                if (stat && stat.boundCount === 0) {
+                    console.warn('默认待机clip未绑定到VRM骨骼，尝试重定向后重建action');
+                    const retargeted = this._retargetClipToVRMBones(clip);
+                    if (retargeted) {
+                        const newAction = this.mixer.clipAction(retargeted);
+                        newAction.clampWhenFinished = false;
+                        newAction.setLoop(THREE.LoopRepeat, Infinity);
+                        newAction.setEffectiveWeight(1.0);
+                        newAction.setEffectiveTimeScale(1.0);
+                        try { action.stop(); } catch (_) {}
+                        newAction.play();
+                        this.clipActions[name] = newAction;
+                        this.defaultIdleAction = newAction;
+                        this.currentClipAction = newAction;
+                        console.log('默认待机clip已重定向并重建action');
+                    } else {
+                        console.warn('默认待机重定向失败，保留原action');
+                    }
+                }
+            } catch (_) {}
+
+            // 恢复默认待机/呼吸（确保存活）
+            try { this.resumeDefaultIdleAnimations(); } catch (_) {}
+            console.log('默认待机 VRMA 已启动循环:', this._defaultIdleUrl);
+        } catch (e) {
+            console.warn('启动默认待机 VRMA 异常:', e);
+        }
     }
     
     // 基于VRM骨骼的呼吸动画
@@ -2721,6 +4019,21 @@ class VRMManager {
             // 设置待机模式
             setIdleMode: (enabled) => {
                 this.setIdleMode(enabled);
+            },
+
+            // 取景预设（face / half / full）
+            setFramePreset: (preset = 'half') => {
+                return this.setFramePreset(preset);
+            },
+
+            // 手动设置相机位置并指向原点
+            setCameraPosition: (x = 0, y = 0, z = 2.5) => {
+                if (!this.camera) return false;
+                this._autoCompose = false;
+                this.camera.position.set(x, y, z);
+                this.camera.lookAt(0, 0, 0);
+                this.camera.updateProjectionMatrix();
+                return true;
             }
         };
         
@@ -2914,7 +4227,8 @@ class VRMManager {
             const preferences = {
                 model_path: modelPath,
                 position: position,
-                scale: scale
+                scale: scale,
+                aesthetic: this._getCurrentAestheticParameters()
             };
             const response = await fetch('/api/preferences', {
                 method: 'POST',

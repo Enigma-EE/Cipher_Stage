@@ -22,7 +22,7 @@ class ModelManager {
             this.currentModelType = window.modelType || 
                                   localStorage.getItem('modelType') || 
                                   new URLSearchParams(window.location.search).get('model') || 
-                                  'live2d';
+                                  (window.vrmModelPath ? 'vrm' : 'live2d');
         }
         return this.currentModelType;
     }
@@ -151,7 +151,7 @@ class ModelManager {
                     await injectLocalThreeStack();
                 }
                 // 放宽等待时间并包含 THREE 未定义的情况
-                while ((!hasThree() || isStubThree() || !hasGLTF()) && Date.now() - start < 5000) {
+                while ((!hasThree() || isStubThree() || !hasGLTF()) && Date.now() - start < 8000) {
                     await new Promise(r => setTimeout(r, 100));
                 }
                 // 最后一次保险等待
@@ -167,13 +167,42 @@ class ModelManager {
                 if (!hasGLTF()) {
                     console.warn('GLTFLoader仍未就绪，将使用回退逻辑');
                 } else {
-                    console.log('Three/GLTF就绪，VRM插件:', hasVRMPlugin() ? '可用' : '缺失(将回退)');
+                    console.log('Three/GLTF就绪，VRM插件:', hasVRMPlugin() ? '可用' : '缺失(尝试回退/注入失败)');
                 }
             };
 
-            // 等待VRM管理器加载
+            // 等待/兜底：VRM 管理器加载
             if (!window.vrmManager) {
-                console.error('VRM管理器未找到');
+                console.warn('VRM管理器未找到，等待入口栈完成初始化');
+                // 如果页面已包含 vrm.js 脚本标签，避免重复注入导致 redeclaration
+                const hasVrmJsTag = !!document.querySelector('script[src="/static/vrm.js"]');
+                const startWait = Date.now();
+                while (!window.vrmManager && Date.now() - startWait < 6000) {
+                    await new Promise(r => setTimeout(r, 100));
+                }
+                // 若仍不可用且没有脚本标签（比如非 index 入口），再尝试一次注入
+                if (!window.vrmManager && !hasVrmJsTag) {
+                    console.warn('入口未包含 vrm.js，尝试注入一次');
+                    await new Promise((resolve) => {
+                        try {
+                            const s = document.createElement('script');
+                            s.src = '/static/vrm.js';
+                            s.onload = () => resolve(true);
+                            s.onerror = () => resolve(false);
+                            document.head.appendChild(s);
+                        } catch (_) { resolve(false); }
+                    });
+                    // 再等一小段时间
+                    const start2 = Date.now();
+                    while (!window.vrmManager && Date.now() - start2 < 3000) {
+                        await new Promise(r => setTimeout(r, 100));
+                    }
+                }
+            }
+            if (!window.vrmManager) {
+                console.error('VRM管理器仍未可用，回退到 Live2D');
+                try { this.setModelType && this.setModelType('live2d'); } catch (_) {}
+                await this.initLive2DModel();
                 return;
             }
             
@@ -188,14 +217,29 @@ class ModelManager {
                 }
             }
             await window.vrmManager.initThree('vrm-canvas', 'vrm-container');
-            // 在模型加载完成后填充专业动画库按钮
+            // 等待后端注入的 vrmModelPath 可用，以防首次解析时未赋值导致使用回退路径
+            const waitForModelPath = async (maxMs = 2000) => {
+                const start = Date.now();
+                while ((!window.vrmModelPath || typeof window.vrmModelPath !== 'string') && Date.now() - start < maxMs) {
+                    await new Promise(r => setTimeout(r, 50));
+                }
+                return window.vrmModelPath;
+            };
+            await waitForModelPath(1500);
+            // 在模型加载完成后填充专业动画库按钮，并自动应用 half 取景
             window.vrmManager.onModelLoaded = () => {
                 try { populateVRMClipButtons(); } catch (e) { console.warn('填充AnimationClip按钮失败:', e); }
+                try {
+                    if (window.vrmManager && typeof window.vrmManager.setFramePreset === 'function') {
+                        window.vrmManager.setFramePreset('half');
+                    }
+                } catch (e) { console.warn('自动应用 half 预设失败:', e); }
             };
             
-            // 加载EE.vrm模型
-            const modelPath = '/static/EE.vrm';
-            await window.vrmManager.loadModel(modelPath);
+            // 加载 VRM 模型（优先使用模板传入路径）
+        // 默认加载 Unity 导出的 VRM1（含 SpringBone）
+        const modelPath = (typeof window !== 'undefined' && window.vrmModelPath) ? window.vrmModelPath : '/static/EE.vrm';
+        await window.vrmManager.loadModel(modelPath);
 
             // 默认应用环境贴图以提升质感（若存在本地HDR）
             try {
@@ -679,6 +723,7 @@ function applyI18NToControlPanels() {
         
         document.body.appendChild(controlPanel);
         applyI18NToControlPanels();
+        try { updatePanelSafeBottom(); } catch (_) {}
     }
     
     // 创建VRM控制面板
@@ -1243,7 +1288,7 @@ function applyI18NToControlPanels() {
         moveGroup.appendChild(moveLabel);
         const moveRow = document.createElement('div');
         moveRow.className = 'control-row';
-        // 默认启用拖拽，仅通过“锁定”开关禁止移动，逻辑与 Live2D 一致
+        // 默认关闭拖拽，避免用户误触移动模型；如需移动可“解锁”后再拖拽
         try { window.vrmManager && window.vrmManager.enableDrag && window.vrmManager.enableDrag(true); } catch (_) {}
 
         const lockBtn = document.createElement('button');
@@ -1271,7 +1316,167 @@ function applyI18NToControlPanels() {
         try { populateVRMClipButtons(); } catch (e) { console.warn('创建面板时填充AnimationClip按钮失败:', e); }
         
         document.body.appendChild(controlPanel);
+
+        // 右侧取景预设按钮：face/half/full
+        try {
+            if (!document.getElementById('vrm-frame-presets')) {
+                const presets = document.createElement('div');
+                presets.id = 'vrm-frame-presets';
+                Object.assign(presets.style, {
+                    position: 'fixed',
+                    right: '12px',
+                    top: '50%',
+                    transform: 'translateY(-50%)',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '8px',
+                    zIndex: 1000,
+                    pointerEvents: 'auto'
+                });
+
+                const makeBtn = (label, preset, bg) => {
+                    const b = document.createElement('button');
+                    b.className = 'control-button';
+                    b.textContent = label;
+                    b.style.backgroundColor = bg;
+                    b.style.color = 'white';
+                    b.style.pointerEvents = 'auto';
+                    b.onclick = () => {
+                        try {
+                            if (window.vrmManager && typeof window.vrmManager.setFramePreset === 'function') {
+                                window.vrmManager.setFramePreset(preset);
+                            }
+                        } catch (e) { console.warn('设置取景预设失败:', e); }
+                    };
+                    return b;
+                };
+
+                // face（特写） / half（默认半身） / full（全身）
+                presets.appendChild(makeBtn('face（特写）', 'face', '#8E24AA'));
+                presets.appendChild(makeBtn('half（半身）', 'half', '#1976D2'));
+                presets.appendChild(makeBtn('full（全身）', 'full', '#2E7D32'));
+
+                document.body.appendChild(presets);
+
+                // 舞台灯光/相机调节面板（简版）
+                const lc = document.createElement('div');
+                lc.id = 'vrm-light-controls';
+                Object.assign(lc.style, {
+                    position: 'relative',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '6px',
+                    zIndex: 1,
+                    padding: '8px',
+                    borderRadius: '8px',
+                    background: 'rgba(20,22,30,0.65)',
+                    color: '#fff',
+                    marginTop: '10px',
+                    width: '240px'
+                });
+
+                const makeSlider = (label, min, max, step, init, onChange) => {
+                    const wrap = document.createElement('div');
+                    const lab = document.createElement('div');
+                    lab.textContent = label;
+                    lab.style.fontSize = '12px';
+                    const inp = document.createElement('input');
+                    inp.type = 'range';
+                    inp.min = String(min);
+                    inp.max = String(max);
+                    inp.step = String(step);
+                    inp.value = String(init);
+                    inp.oninput = () => { try { onChange(parseFloat(inp.value)); } catch (e) { console.warn(label+' 更新失败:', e); } };
+                    wrap.appendChild(lab);
+                    wrap.appendChild(inp);
+                    return wrap;
+                };
+
+                // Key/Fill/Rim 强度
+                lc.appendChild(makeSlider('Key 强度', 0, 3, 0.1, 1.8, (v) => {
+                    if (window.vrmManager) window.vrmManager.setLightIntensities({ key: v });
+                }));
+                lc.appendChild(makeSlider('Fill 强度', 0, 2, 0.1, 0.8, (v) => {
+                    if (window.vrmManager) window.vrmManager.setLightIntensities({ fill: v });
+                }));
+                lc.appendChild(makeSlider('Rim 强度', 0, 2, 0.1, 0.9, (v) => {
+                    if (window.vrmManager) window.vrmManager.setLightIntensities({ rim: v });
+                }));
+
+                // Hemi 半球环境光强度
+                lc.appendChild(makeSlider('Hemi 强度', 0, 1.5, 0.05, 0.35, (v) => {
+                    if (window.vrmManager) window.vrmManager.setLightIntensities({ hemi: v });
+                }));
+
+                // 阴影可见度（近似软硬控制）
+                lc.appendChild(makeSlider('阴影透明度', 0, 1, 0.01, 0.32, (v) => {
+                    if (window.vrmManager) window.vrmManager.setShadowOpacity(v);
+                }));
+
+                // 相机平滑速度
+                lc.appendChild(makeSlider('相机平滑速度', 0.1, 10, 0.1, 4.0, (v) => {
+                    if (window.vrmManager) window.vrmManager.setCameraSmooth(v);
+                }));
+                // 显示地面切换
+                const groundRow = document.createElement('label');
+                groundRow.style.fontSize = '12px';
+                groundRow.style.display = 'flex';
+                groundRow.style.alignItems = 'center';
+                groundRow.style.gap = '6px';
+                const groundCb = document.createElement('input');
+                groundCb.type = 'checkbox';
+                groundCb.checked = true;
+                groundCb.onchange = () => { if (window.vrmManager) window.vrmManager.toggleGround(groundCb.checked); };
+                const groundText = document.createElement('span');
+                groundText.textContent = '显示地面';
+                groundRow.appendChild(groundCb);
+                groundRow.appendChild(groundText);
+                lc.appendChild(groundRow);
+
+                // 保存偏好按钮（记录模型位置/缩放及美观参数）
+                const saveRow = document.createElement('div');
+                saveRow.style.display = 'flex';
+                saveRow.style.alignItems = 'center';
+                saveRow.style.justifyContent = 'space-between';
+                saveRow.style.gap = '8px';
+                const saveTip = document.createElement('span');
+                saveTip.style.fontSize = '12px';
+                saveTip.style.opacity = '0.85';
+                saveTip.textContent = '将当前外观保存为偏好';
+                const saveBtn = document.createElement('button');
+                saveBtn.className = 'control-button';
+                saveBtn.textContent = '保存偏好';
+                saveBtn.style.backgroundColor = '#1E88E5';
+                saveBtn.style.color = '#fff';
+                saveBtn.onclick = async () => {
+                    try {
+                        const vm = window.vrmManager;
+                        if (!vm || !vm.currentModel) { console.warn('未加载 VRM/GLTF 模型'); return; }
+                        const root = vm.currentModel.scene || vm.currentModel;
+                        const modelPath = vm.modelUrl || (vm.modelRootPath && vm.modelName ? (vm.modelRootPath + vm.modelName + '.vrm') : null);
+                        const position = { x: root.position.x, y: root.position.y, z: root.position.z };
+                        // 后端校验要求 scale 为包含 x/y 的对象
+                        const scale = (root.scale && typeof root.scale.x === 'number' && typeof root.scale.y === 'number')
+                            ? { x: root.scale.x, y: root.scale.y }
+                            : { x: 1.0, y: 1.0 };
+                        const ok = await vm.saveUserPreferences(modelPath, position, scale);
+                        saveBtn.textContent = ok ? '已保存' : '保存失败';
+                        saveBtn.style.backgroundColor = ok ? '#2E7D32' : '#C62828';
+                        setTimeout(() => {
+                            saveBtn.textContent = '保存偏好';
+                            saveBtn.style.backgroundColor = '#1E88E5';
+                        }, 1200);
+                    } catch (e) { console.warn('保存偏好操作失败:', e); }
+                };
+                saveRow.appendChild(saveTip);
+                saveRow.appendChild(saveBtn);
+                lc.appendChild(saveRow);
+
+                presets.appendChild(lc);
+            }
+        } catch (_) {}
         applyI18NToControlPanels();
+        try { updatePanelSafeBottom(); } catch (_) {}
         // 标记已创建，避免后续任何路径重复创建
         window.__vrmControlsCreated = true;
     }
@@ -1567,17 +1772,33 @@ async function applyVRMHDR(url) {
         console.warn('应用HDR出错:', e);
     }
 }
+// 从本地文件应用环境贴图（支持 .hdr/.jpg/.png）
+async function applyVRMEnvironmentFile(file) {
+    if (!window.vrmManager || !file) return;
+    try {
+        const ok = await window.vrmManager.setEnvironmentFile(file);
+        if (!ok) {
+            console.warn('从文件应用环境失败或不支持，保持现状');
+        }
+    } catch (e) {
+        console.warn('从文件应用环境出错:', e);
+    }
+}
 function clearVRMEnvironment() {
     if (!window.vrmManager || !window.vrmManager.scene) return;
     try {
-        // 清除环境光照与反射
-        window.vrmManager.scene.environment = null;
-        // 同步清除背景图像
-        window.vrmManager.scene.background = null;
-        // 如果管理器持有HDR背景纹理引用，尝试释放
-        if (window.vrmManager._hdrBackgroundTexture) {
-            try { window.vrmManager._hdrBackgroundTexture.dispose?.(); } catch (e) {}
-            window.vrmManager._hdrBackgroundTexture = null;
+        // 使用 VRMManager 的统一清理逻辑，确保2D背景也被隐藏
+        if (typeof window.vrmManager.clearEnvironment === 'function') {
+            window.vrmManager.clearEnvironment();
+        } else {
+            // 兼容旧逻辑
+            window.vrmManager.scene.environment = null;
+            window.vrmManager.scene.background = null;
+            if (window.vrmManager._hdrBackgroundTexture) {
+                try { window.vrmManager._hdrBackgroundTexture.dispose?.(); } catch (e) {}
+                window.vrmManager._hdrBackgroundTexture = null;
+            }
+            try { window.vrmManager.renderer.setClearColor(0x000000, 0); } catch (_) {}
         }
     } catch (e) {}
 }
@@ -1784,7 +2005,7 @@ function init_app(){
         socket = new WebSocket(wsUrl);
 
         socket.onopen = () => {
-            console.log('WebSocket连接已建立');
+            console.log('WebSocket连接已建立', { url: wsUrl });
             isConnecting = false;
         };
 
@@ -2379,12 +2600,30 @@ function init_app(){
         }
     }
 
-    // 应用情感到Live2D模型
+    // 应用情感到模型（优先VRM，兼容Live2D）
     function applyEmotion(emotion) {
-        if (window.LanLan1 && window.LanLan1.setEmotion) {
-            console.log('调用window.LanLan1.setEmotion:', emotion);
-            window.LanLan1.setEmotion(emotion);
-        } else {
+        let applied = false;
+        // VRM 表情（通过 vrmAgent）
+        if (window.vrmAgent && typeof window.vrmAgent.setEmotion === 'function') {
+            try {
+                console.log('调用window.vrmAgent.setEmotion:', emotion);
+                window.vrmAgent.setEmotion(emotion);
+                applied = true;
+            } catch (e) {
+                console.warn('VRM表情调用失败:', e);
+            }
+        }
+        // Live2D 表情（兼容保留）
+        if (window.LanLan1 && typeof window.LanLan1.setEmotion === 'function') {
+            try {
+                console.log('调用window.LanLan1.setEmotion:', emotion);
+                window.LanLan1.setEmotion(emotion);
+                applied = true;
+            } catch (e) {
+                console.warn('Live2D表情调用失败:', e);
+            }
+        }
+        if (!applied) {
             console.warn('情感功能未初始化');
         }
     }
@@ -2826,6 +3065,25 @@ function init_app(){
     window.stopScreenSharing  = stopScreenSharing;
     window.screen_share       = startScreenSharing; // 兼容老按钮
 }
+
+// 根据可见的控制面板高度，动态设置画面底部安全区
+function updatePanelSafeBottom() {
+    try {
+        const vrmPanel = document.getElementById('vrm-control-panel');
+        const l2dPanel = document.getElementById('live2d-control-panel');
+        const getVisibleHeight = (el) => {
+            if (!el) return 0;
+            const style = window.getComputedStyle(el);
+            if (style.display === 'none' || style.visibility === 'hidden' || el.offsetParent === null) return 0;
+            return el.offsetHeight || 0;
+        };
+        const h = Math.max(getVisibleHeight(vrmPanel), getVisibleHeight(l2dPanel));
+        const safe = (h > 0 ? h : 200) + 40; // 底部边距预留
+        document.documentElement.style.setProperty('--panel-safe-bottom', safe + 'px');
+    } catch (e) { console.warn('更新底部安全区失败:', e); }
+}
+
+try { window.addEventListener('resize', () => updatePanelSafeBottom()); } catch (_) {}
 
 const ready = () => {
     if (ready._called) return;

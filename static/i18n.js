@@ -154,7 +154,8 @@
   if (legacy && !localStorage.getItem(STORAGE_KEY)) {
     try { localStorage.setItem(STORAGE_KEY, legacy); } catch (_) {}
   }
-  const initialLang = normalize(saved || navigator.language || 'zh-CN');
+  // Default to English when no preference is saved
+  const initialLang = normalize(saved || navigator.language || 'en');
 
   const I18N = {
     lang: initialLang,

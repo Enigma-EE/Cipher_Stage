@@ -8,8 +8,19 @@ class ImportantSettingsManager:
     def __init__(self, settings_file=None):
         _, _, master_basic_config, lanlan_basic_config, name_mapping, _, _, _, setting_store, _ = get_character_data()
         self.settings_file = settings_file if settings_file is not None else setting_store
-        self.proposer = ChatOpenAI(model=SETTING_PROPOSER_MODEL, base_url=OPENROUTER_URL, api_key=OPENROUTER_API_KEY, temperature=0.5)
-        self.verifier = ChatOpenAI(model=SETTING_VERIFIER_MODEL, base_url=OPENROUTER_URL, api_key=OPENROUTER_API_KEY, temperature=0.5)
+        # 默认离线模式：当未配置 API Key 或初始化异常时，跳过 LLM 初始化
+        self.proposer = None
+        self.verifier = None
+        try:
+            api_key = OPENROUTER_API_KEY if OPENROUTER_API_KEY and OPENROUTER_API_KEY != '' else None
+            if api_key:
+                self.proposer = ChatOpenAI(model=SETTING_PROPOSER_MODEL, base_url=OPENROUTER_URL, api_key=api_key, temperature=0.5)
+                self.verifier = ChatOpenAI(model=SETTING_VERIFIER_MODEL, base_url=OPENROUTER_URL, api_key=api_key, temperature=0.5)
+        except Exception as e:
+            # 在离线模式或初始化失败时降级为无 LLM
+            print("初始化设定模型失败：", e)
+            self.proposer = None
+            self.verifier = None
         self.settings = {}
         self.master_basic_config = master_basic_config
         self.lanlan_basic_config = lanlan_basic_config
@@ -54,6 +65,9 @@ class ImportantSettingsManager:
         return old_settings
 
     def extract_and_update_settings(self, messages, lanlan_name):
+        # 离线模式下跳过设定提取
+        if self.proposer is None:
+            return
         name_mapping = self.name_mapping.copy()
         name_mapping['ai'] = lanlan_name
         lines = []

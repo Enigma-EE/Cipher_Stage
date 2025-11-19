@@ -2,6 +2,7 @@ from langchain_community.chat_message_histories import SQLChatMessageHistory
 from langchain_core.messages import SystemMessage
 from sqlalchemy import create_engine, text
 from config import TIME_ORIGINAL_TABLE_NAME, TIME_COMPRESSED_TABLE_NAME, get_character_data
+import os
 from datetime import datetime
 
 class TimeIndexedMemory:
@@ -9,8 +10,16 @@ class TimeIndexedMemory:
         self.engine = {}
         self.recent_history_manager = recent_history_manager
         _, _, _, _, _, _, _, time_store, _, _ = get_character_data()
+        # 统一存储到 memory/store 绝对路径下
+        base_store_dir = os.path.join(os.path.dirname(__file__), 'store')
+        os.makedirs(base_store_dir, exist_ok=True)
+        self.db_path = {}
         for i in time_store:
-            self.engine[i] = create_engine(f"sqlite:///{time_store[i]}")
+            abs_path = os.path.join(base_store_dir, os.path.basename(time_store[i]))
+            self.db_path[i] = abs_path
+            # 确保父目录存在
+            os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+            self.engine[i] = create_engine(f"sqlite:///{abs_path}")
 
             _ = SQLChatMessageHistory(
                 connection=self.engine[i],

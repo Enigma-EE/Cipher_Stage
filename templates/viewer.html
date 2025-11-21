@@ -582,8 +582,9 @@ if (chatContentWrapper) {
 
     window.PIXI = PIXI;
     const {Live2DModel} = PIXI.live2d;
-    const model_path_dict = {"小八": "/static/live2d/mianyin.model3.json", "库洛": "/static/live2d_2/SAYO.model3.json"}
-    const cubism4Model = model_path_dict["{{ ee_name }}"]; 
+    const model_path_dict = {"Zero": "/static/mao_pro/mao_pro.model3.json"};
+    const defaultModel = "/static/mao_pro/mao_pro.model3.json";
+    const cubism4Model = model_path_dict["{{ ee_name }}"] || defaultModel;
     (async function () {
         const pixi_app = new PIXI.Application({
             view: document.getElementById('live2d-canvas'),

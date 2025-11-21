@@ -1044,6 +1044,230 @@
             }
         }
     </style>
+    <!-- Glass UI Experiment Styles: BEGIN (easy to revert) -->
+    <style id="glass-ui-experiment">
+        :root {
+            --glass-bg: rgba(15, 15, 20, 0.65);
+            --glass-border: rgba(255, 255, 255, 0.08);
+            --accent-color: #7c4dff;
+            --text-primary: #ffffff;
+            --text-secondary: #b3b3b3;
+            --dock-size: 60px;
+        }
+
+        body, html {
+            margin: 0; padding: 0; height: 100%;
+            font-family: 'Segoe UI', sans-serif;
+            /* 仅设置背景，不覆盖全局文字颜色与滚动行为 */
+            background: radial-gradient(circle at 50% 50%, #1a1a2e 0%, #000000 100%);
+        }
+
+        .glass-panel {
+            background: var(--glass-bg);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid var(--glass-border);
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+            border-radius: 16px;
+            color: var(--text-primary);
+            transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+        }
+
+        /* 底部 Dock 栏 */
+        #bottom-dock {
+            position: fixed;
+            bottom: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 16px;
+            padding: 12px 24px;
+            z-index: 100;
+            border-radius: 24px;
+        }
+
+        .dock-btn {
+            width: 50px; height: 50px;
+            border-radius: 14px;
+            border: none;
+            background: rgba(255,255,255,0.05);
+            color: white;
+            font-size: 24px;
+            cursor: pointer;
+            transition: all 0.25s ease;
+            display: flex; align-items: center; justify-content: center;
+            position: relative;
+        }
+
+        .dock-btn:hover:not(:disabled) {
+            transform: translateY(-10px) scale(1.1);
+            background: var(--accent-color);
+            box-shadow: 0 10px 20px rgba(124, 77, 255, 0.4);
+        }
+
+        .dock-btn:disabled {
+            opacity: 0.3; cursor: not-allowed;
+        }
+
+        .dock-btn::after {
+            content: attr(data-tooltip);
+            position: absolute;
+            top: -40px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0,0,0,0.8);
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            white-space: nowrap;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.2s;
+        }
+        .dock-btn:hover::after { opacity: 1; }
+
+        /* 顶部状态栏 */
+        #status-pill {
+            position: fixed;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            padding: 8px 20px;
+            border-radius: 20px;
+            font-size: 14px;
+            font-weight: 500;
+            letter-spacing: 0.5px;
+            z-index: 90;
+            pointer-events: none;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .status-dot {
+            width: 8px; height: 8px;
+            background: #4caf50;
+            border-radius: 50%;
+            box-shadow: 0 0 8px #4caf50;
+        }
+
+        /* 聊天窗口 */
+        #chat-container {
+            position: fixed;
+            left: 20px; bottom: 110px;
+            width: 320px; height: 300px;
+            padding: 0;
+            display: flex; flex-direction: column;
+            z-index: 50;
+        }
+        #chat-content-wrapper {
+            flex: 1;
+            padding: 15px;
+            overflow-y: auto;
+            scrollbar-width: none;
+        }
+        .message {
+            margin-bottom: 10px; padding: 8px 12px;
+            border-radius: 10px; font-size: 14px; line-height: 1.5;
+            animation: fadeIn 0.3s ease;
+        }
+        .message.user { background: rgba(124, 77, 255, 0.2); border-left: 3px solid var(--accent-color); align-self: flex-end; }
+        .message.gemini { background: rgba(255,255,255,0.05); }
+
+        #input-row {
+            padding: 10px;
+            background: rgba(0,0,0,0.2);
+            border-top: 1px solid rgba(255,255,255,0.05);
+            display: flex; gap: 8px;
+        }
+        #userInput {
+            flex: 1; background: rgba(255,255,255,0.1); border: none;
+            color: white; padding: 8px 12px; border-radius: 18px; outline: none;
+        }
+        #sendButton {
+            background: var(--accent-color); color: white; border: none;
+            padding: 0 16px; border-radius: 18px; cursor: pointer;
+        }
+
+        /* 保留原有控制面板定位与主题，不在实验样式中覆盖 */
+
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
+    </style>
+    <!-- Glass UI Experiment Styles: END -->
+    <!-- Dock Theme Overlay: START (reversible) -->
+    <style id="dock-theme">
+        /* 仅在 #sidebar 具有 .dock 类时生效，随时可移除或去掉该类回退 */
+        #sidebar.dock:not(.minimized) {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            transform: none;
+            z-index: 1000;
+            width: auto !important;
+            height: auto !important;
+            padding: 8px 10px;
+            /* 不改变原本的内部布局，保持与五个功能按钮一致的纵向排列 */
+            display: block;
+            background: rgba(20, 21, 24, 0.55);
+            backdrop-filter: blur(14px) saturate(160%);
+            -webkit-backdrop-filter: blur(14px) saturate(160%);
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 12px;
+            box-shadow: 0 8px 28px rgba(0,0,0,0.40);
+        }
+
+        #sidebar.dock #sidebarbox {
+            background: transparent;
+            border: none;
+            box-shadow: none;
+        }
+
+        #sidebar.dock .side-btn {
+            background: rgba(255,255,255,0.08);
+            color: #f5f5f7;
+            border: 1px solid rgba(255,255,255,0.12);
+            border-radius: 8px; /* 与原样式对齐 */
+            padding: 10px 20px; /* 与原 side-btn 尺寸一致 */
+            font-size: 1rem;   /* 与原字体大小一致 */
+            transition: background 160ms ease, transform 160ms ease, box-shadow 160ms ease;
+        }
+        #sidebar.dock .side-btn:hover {
+            background: rgba(255,255,255,0.16);
+            transform: translateY(-1px);
+            box-shadow: 0 10px 22px rgba(0,0,0,0.28);
+        }
+
+        #sidebar.dock #toggle-sidebar-btn {
+            background: rgba(255,255,255,0.12);
+            color: #f5f5f7;
+            border: 1px solid rgba(255,255,255,0.15);
+            border-radius: 10px;
+        }
+
+        /* 顶部状态胶囊：复用现有 #status 元素，避免新增/重复 ID */
+        #sidebar.dock #status {
+            position: fixed;
+            top: 16px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 1000;
+            padding: 6px 12px;
+            border-radius: 999px;
+            background: rgba(20,21,24,0.55);
+            color: #e6e8eb;
+            border: 1px solid rgba(255,255,255,0.12);
+            box-shadow: 0 4px 16px rgba(0,0,0,0.35);
+        }
+
+        /* 侧栏被最小化时，保留脚本控制的 48px 收缩行为，不覆盖宽高 */
+        #sidebar.dock.minimized {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            transform: none;
+            z-index: 1000;
+        }
+    </style>
+    <!-- Dock Theme Overlay: END -->
 </head>
 <body>
 <div id="agent-panel">
@@ -1090,7 +1314,7 @@
         </div>
     </div>
 </div>
-<div id="sidebar">
+<div id="sidebar" class="dock">
     <div id="sidebarbox">
         <button id="toggle-sidebar-btn" title="折叠侧边栏">—</button>
         <div class="lang-switch" style="margin: 6px 0; display: flex; align-items: center; gap: 8px;">

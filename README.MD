@@ -267,3 +267,52 @@ MIT license. You may use, modify, and distribute the code and binaries, preservi
   - 可以，通过 `config/core_config.json` 或设置页面切换；必要时填入相应密钥
 
 
+---
+
+## Note
+
+- VTuber 所需渲染
+骨骼动画,
+Blendshape（表情）,
+Shader 特效,
+灯光控制,
+背景合成,
+输出透明视频流（通过 OBS 或 WebRTC）.
+
+- 纯 AI 驱动画
+AI → 动作序列,
+AI → 表情序列,
+渲染和输出.
+
+
+- 关键模块
+1. AI 动作生成（Avatar Motion AI）
+2. AI 表情生成（Face Animation AI）
+3. AI 语音 / 角色人格（LLM + TTS）
+4. Unity/UE/Blender 渲染舞台
+5. OBS 合成（透明背景输出）
+
+- VTuber 的重点
+```
+角色个性，
+说话方式，
+表情和姿态，
+视觉风格，
+和观众互动。
+```
+
+## 可选
+
+- UE5
+
+完整的 3D 舞台系统，
+
+做复杂特效，
+
+做近乎 AAA 级的渲染，
+
+做真实的物理模拟，
+
+要虚拟直播间里跑、跳、翻转，
+
+需要动画蓝图控制器（基于状态机切换动画）。

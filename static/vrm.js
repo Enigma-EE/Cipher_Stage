@@ -72,10 +72,10 @@ class VRMManager {
         // 无重力测试模式（用于定位刘海前冲是否由重力导致）
         this._noGravityTest = false; // 默认关闭；如需验证可通过 setNoGravityTest(true) 开启
 
-        // 物理干预开关（默认全部关闭，遵循模型自身参数）
-        this._enableHairTuning = false;      // 是否微调头发的 springbone 参数
-        this._forceSpringGravity = false;    // 是否强制设置重力方向为世界 -Y
-        this._forceSpringCenter = false;     // 是否强制 springbone 中心为 hips/scene root
+        // 物理干预开关（默认开启头发调参，以修复 VRM1 刘海前冲）
+        this._enableHairTuning = true;       // 是否微调头发的 springbone 参数
+        this._forceSpringGravity = true;     // 是否强制设置重力方向为世界 -Y（开启以抑制前冲）
+        this._forceSpringCenter = true;      // 是否强制 springbone 中心为 hips/scene root（开启以稳定摆动）
 
         // 最近一次加载的 GLTF 与 JSON（用于调试扩展与插件是否生效）
         this._lastGltf = null;
@@ -112,51 +112,179 @@ class VRMManager {
         }
     }
 
-    // 仅针对“头发”相关骨骼微调物理参数，避免出现“漂浮”
+    // 【增强版】物理参数微调与碰撞体修正
     _tuneHairPhysics(springBoneManager) {
-        if (!springBoneManager) return;
-        // 扩大匹配范围，兼容中日英文常见命名
+        console.log('【PhysicsFix】正在启动物理微调程序...');
+
+        if (!springBoneManager) {
+            console.warn('【PhysicsFix】SpringBone管理器不存在，跳过。');
+            return;
+        }
+
+        // 1. 暴力获取骨骼列表 (兼容公开属性 joints/springBones 和私有属性 _joints)
+        // 日志显示你的管理器里有 _joints，这很关键
+        const rawJoints = springBoneManager.springBones ||
+                          springBoneManager.joints ||
+                          springBoneManager._joints ||
+                          springBoneManager._springBones;
+
+        let joints = [];
+        if (rawJoints instanceof Set) {
+            joints = Array.from(rawJoints);
+        } else if (Array.isArray(rawJoints)) {
+            joints = rawJoints;
+        }
+
+        console.log(`【PhysicsFix】捕获到物理关节数量: ${joints.length}`);
+
+        if (joints.length === 0) {
+            console.warn('【PhysicsFix】未找到任何关节，无法微调。');
+            return;
+        }
+
+        // 2. 缩小碰撞体 (Collider) - 解决刘海被“空气头”顶飞的问题
+        // 获取所有碰撞体组
+        const colliderGroups = springBoneManager.colliderGroups || springBoneManager._colliderGroups || [];
+        let shrunkColliders = 0;
+
+        // 遍历所有碰撞体，如果是头部的，稍微缩小一点
+        if (colliderGroups instanceof Set || Array.isArray(colliderGroups)) {
+            const groups = Array.isArray(colliderGroups) ? colliderGroups : Array.from(colliderGroups);
+            for (const group of groups) {
+                // 简单粗暴：把所有碰撞体半径缩小到原来的 80%
+                // 这样可以避免头发被异常撑开
+                const colliders = group.colliders || group._colliders || [];
+                for (const c of colliders) {
+                    if (c.radius !== undefined) {
+                        c.radius *= 0.85; // 缩小 15%
+                        shrunkColliders++;
+                    }
+                }
+            }
+        }
+        console.log(`【PhysicsFix】已缩小 ${shrunkColliders} 个碰撞体半径，防止头发被撑开。`);
+
+        // 3. 调整头发重力与刚度
         const hairKeys = ['hair', 'bang', 'fringe', 'front', 'pony', 'braid', '髪', '发', '刘海'];
         let touched = 0;
 
-        // VRM1 结构：manager.joints[], 每个 joint 有 node/settings
-        const joints = springBoneManager.joints;
-        if (Array.isArray(joints) && joints.length > 0) {
-            for (const j of joints) {
-                const n = (j && (j.node?.name || j.bone?.name || j._node?.name)) || '';
-                const low = String(n).toLowerCase();
-                const isHair = hairKeys.some(k => low.includes(k));
-                if (!isHair) continue;
-                const s = j.settings || j._settings || j.params || j._params;
-                if (!s) continue;
-                // 更强的“向下”效果：提高重力，适度增加阻尼，降低刚度
-                if (s.gravityPower !== undefined) s.gravityPower = Math.max(1.6, Number(s.gravityPower) || 1.6);
-                if (s.dragForce !== undefined) s.dragForce = Math.max(0.5, Number(s.dragForce) || 0.5);
-                if (s.stiffness !== undefined) s.stiffness = Math.min(0.6, Math.max(0.2, Number(s.stiffness) || 0.2));
-                // 如支持重力方向字段，强制向世界-Y
-                if (s.gravityDir && typeof s.gravityDir.copy === 'function') {
-                    try { s.gravityDir.copy(new THREE.Vector3(0, -1, 0)); } catch (_) {}
+        for (const j of joints) {
+            // 兼容各种骨骼引用方式
+            const boneNode = j.bone || j.node || j._node;
+            const n = boneNode ? boneNode.name : '';
+            const low = String(n).toLowerCase();
+
+            // 匹配头发
+            const isHair = hairKeys.some(k => low.includes(k));
+            if (!isHair) continue;
+
+            // 获取设置对象
+            const s = j.settings || j.setting || j.params || j._settings || j._params;
+
+            if (s) {
+                // 【暴力重力】统一提升，兼容字段别名
+                const gCandidates = ['gravityPower','gravityFactor','gravityScale'];
+                let appliedGravity = false;
+                for (const key of gCandidates) {
+                    if (s[key] !== undefined) { s[key] = Math.max(2.8, parseFloat(s[key]) || 0); appliedGravity = true; }
                 }
-                touched++;
-            }
-        } else if (Array.isArray(springBoneManager.springBoneGroupList)) {
-            // VRM0 结构：groupList，每组拥有 dragForce/stiffness/gravityPower 等
-            for (const g of springBoneManager.springBoneGroupList) {
-                const names = (g?.bones || []).map(b => String(b?.name || '').toLowerCase());
-                const isHair = names.some(nm => hairKeys.some(k => nm.includes(k)));
-                if (!isHair) continue;
-                if (g.gravityPower !== undefined) g.gravityPower = Math.max(1.6, Number(g.gravityPower) || 1.6);
-                if (g.dragForce !== undefined) g.dragForce = Math.max(0.5, Number(g.dragForce) || 0.5);
-                if (g.stiffness !== undefined) g.stiffness = Math.min(0.6, Math.max(0.2, Number(g.stiffness) || 0.2));
+                // 如果没有任何重力字段，尝试在管理器级别再明确一次
+                if (!appliedGravity) {
+                    try {
+                        const mgr = springBoneManager;
+                        const gdir = new THREE.Vector3(0, -1, 0);
+                        if (typeof mgr.setGravity === 'function') mgr.setGravity(gdir);
+                        else if (mgr.gravity && typeof mgr.gravity.copy === 'function') mgr.gravity.copy(gdir);
+                    } catch (_) {}
+                }
+
+                // 【重力方向】强制指向世界坐标下方
+                if (s.gravityDir) {
+                    if (typeof s.gravityDir.set === 'function') {
+                        s.gravityDir.set(0, -1, 0);
+                    } else {
+                        s.gravityDir = { x: 0, y: -1, z: 0 };
+                    }
+                }
+
+                // 【降低刚度】兼容字段别名，让头发更软
+                const stiffCandidates = ['stiffness','stiffnessForce','stiffnessFactor'];
+                for (const key of stiffCandidates) {
+                    if (s[key] !== undefined) { s[key] = Math.min(0.015, parseFloat(s[key]) || 0.5); }
+                }
+
+                // 【增加阻力】兼容 drag 字段别名，收敛摆动
+                const dragCandidates = ['dragForce','drag','dragCoefficient'];
+                for (const key of dragCandidates) {
+                    if (s[key] !== undefined) { s[key] = Math.max(0.8, parseFloat(s[key]) || 0); }
+                }
+
                 touched++;
             }
         }
 
-        if (touched > 0) {
-            console.log(`已微调头发物理参数，影响关节/组数量: ${touched}`);
-        } else {
-            console.log('未检测到明显的头发关节，未做物理微调');
+        console.log(`【PhysicsFix】微调完成！已强制修正 ${touched} 个头发关节的物理参数。`);
+
+        // 额外保障：再次明确管理器重力方向为 -Y
+        try {
+            const gdir = new THREE.Vector3(0, -1, 0);
+            if (typeof springBoneManager.setGravity === 'function') {
+                springBoneManager.setGravity(gdir);
+            } else if (springBoneManager.gravity && typeof springBoneManager.gravity.copy === 'function') {
+                springBoneManager.gravity.copy(gdir);
+            }
+        } catch (_) {}
+
+        // 4. 强制重置物理状态 (防止加载时的爆炸姿态残留)
+        if (typeof springBoneManager.reset === 'function') {
+            springBoneManager.reset();
         }
+    }
+
+    // 打印当前场景的节点名称与层次（最多 max 条），用于调试骨骼命名
+    printSceneNodes(max = 200) {
+        try {
+            const vrm = this.currentModel;
+            if (!vrm || !vrm.scene) { console.warn('当前没有VRM场景'); return; }
+            let count = 0;
+            vrm.scene.traverse(obj => {
+                if (count >= max) return;
+                const t = obj.type || 'Object3D';
+                const n = obj.name || '(no-name)';
+                console.log(`[SceneNode] ${t}: ${n}`);
+                count++;
+            });
+            console.log('打印场景节点完成，总计:', count);
+        } catch (e) { console.warn('打印场景节点失败:', e); }
+    }
+
+    // 列出 SpringBone joints 名称与关键参数，便于确认识别与调参是否生效
+    debugSpringBones(limit = 200) {
+        try {
+            const vrm = this.currentModel;
+            const mgr = vrm?.springBoneManager;
+            if (!mgr) { console.warn('SpringBone 管理器不存在'); return; }
+            let joints = [];
+            const jv = mgr.joints;
+            if (jv instanceof Set) joints = Array.from(jv);
+            else if (Array.isArray(jv)) joints = jv;
+            console.log(`SpringBone joints 列表 (size=${joints.length})`);
+            let c = 0;
+            for (const j of joints) {
+                if (c >= limit) break;
+                const name = (j?.bone?.name || j?.node?.name || j?._node?.name || '(no-name)');
+                const s = j?.settings || j?._settings || j?.params || j?._params || {};
+                const info = {
+                    name,
+                    stiffness: s.stiffness,
+                    dragForce: s.dragForce,
+                    gravityPower: s.gravityPower,
+                };
+                console.log('[SpringJoint]', info);
+                c++;
+            }
+            console.log('打印 joints 完成，数量:', c);
+        } catch (e) { console.warn('打印 SpringBone joints 失败:', e); }
     }
 
     // 进一步修正：为SpringBone设置合适的参考中心与重力，缓解“刘海前冲”
@@ -246,26 +374,51 @@ class VRMManager {
         } catch (e) { console.warn('设置无重力测试模式失败:', e); }
     }
 
-    // 调试助手：打印 SpringBone 的基本信息
+    // 调试助手：打印 SpringBone 的基本信息（兼容 VRM1 Set/Array 以及 springs/colliderGroups）
     debugSpringBones() {
         try {
             const vrm = this.currentModel;
             const mgr = vrm?.springBoneManager;
             if (!mgr) { console.warn('SpringBone 管理器不存在'); return; }
-            const groups = Array.isArray(mgr.springBoneGroupList) ? mgr.springBoneGroupList : [];
-            const joints = Array.isArray(mgr.joints) ? mgr.joints : [];
-            console.log('[SpringBone] groups:', groups.length, 'joints:', joints.length);
+
+            // 组：VRM0 常见 springBoneGroupList；VRM1 有 colliderGroups
+            const groups = Array.isArray(mgr.springBoneGroupList)
+                ? mgr.springBoneGroupList
+                : (Array.isArray(mgr.colliderGroups) ? mgr.colliderGroups : []);
+            const groupCount = groups.length;
+
+            // joints：VRM1 可能是 Set；VRM0 不公开 joints，则从 springs 统计
+            let jointsCount = 0;
+            const jv = mgr.joints;
+            if (jv instanceof Set) jointsCount = jv.size;
+            else if (Array.isArray(jv)) jointsCount = jv.length;
+
+            // springs：VRM1 常有，内部每个 spring 含若干 joints
+            let springsCount = 0;
+            try {
+                if (Array.isArray(mgr.springs)) {
+                    springsCount = mgr.springs.length;
+                    if (jointsCount === 0) {
+                        jointsCount = mgr.springs.reduce((c, s) => c + (Array.isArray(s?.joints) ? s.joints.length : 0), 0);
+                    }
+                }
+            } catch (_) {}
+
+            console.log('[SpringBone] groups:', groupCount, 'joints:', jointsCount, 'springs:', springsCount);
+
+            // 打印部分组/碰撞体信息
             if (groups.length > 0) {
                 for (let i = 0; i < Math.min(groups.length, 5); i++) {
                     const g = groups[i];
-                    console.log(`  group[${i}]`, g && (g.name || g.id || Object.keys(g)));
+                    const name = g?.name || g?.id || g?.uuid || 'group';
+                    console.log(`  group[${i}]`, name);
                 }
             }
             // 输出中心与重力
             try {
                 const center = mgr.center || null;
                 const gdir = mgr.gravity || null;
-                console.log('[SpringBone] center:', center && (center.name || center.uuid || 'object'));
+                console.log('[SpringBone] center:', center ? (center.name || center.uuid || 'object') : null);
                 if (gdir) console.log('[SpringBone] gravity:', gdir.x?.toFixed?.(2), gdir.y?.toFixed?.(2), gdir.z?.toFixed?.(2));
             } catch (_) {}
         } catch (e) { console.warn('打印 SpringBone 信息失败:', e); }
@@ -881,15 +1034,31 @@ class VRMManager {
         const animate = () => {
             this._animationFrameId = requestAnimationFrame(animate);
             
-            const delta = this.clock.getDelta();
+            const rawDelta = this.clock.getDelta();
+            // 夹紧到最大 33ms，避免低帧率造成一次性大步长引发过度摆动
+            const delta = Math.min(rawDelta, 0.033);
             
+            // 动画按真实步长更新，保持节奏；物理采用固定小步长以提升稳定性
             if (this.mixer) {
-                this.mixer.update(delta);
+                this.mixer.update(rawDelta);
             }
             
             if (this.currentModel) {
-                // 更新VRM模型（包括SpringBone物理系统）
-                this.currentModel.update(delta);
+                // VRM物理固定步长 + 子步迭代，贴近 Unity 的 FixedUpdate 行为
+                this._vrmPhysicsAccumulator = (this._vrmPhysicsAccumulator || 0) + delta;
+                const FIXED_STEP = 0.01; // 10ms ~ 100Hz
+                const MAX_STEPS = 5;     // 每帧最多 5 次子步，避免卡顿时过多迭代
+                let steps = 0;
+                while (this._vrmPhysicsAccumulator >= FIXED_STEP && steps < MAX_STEPS) {
+                    try { this.currentModel.update(FIXED_STEP); } catch (_) {}
+                    this._vrmPhysicsAccumulator -= FIXED_STEP;
+                    steps++;
+                }
+                // 若仍有尾差（小于一个固定步），用一次小步收尾，防止长时间积累
+                if (this._vrmPhysicsAccumulator > 0 && this._vrmPhysicsAccumulator < FIXED_STEP) {
+                    try { this.currentModel.update(this._vrmPhysicsAccumulator); } catch (_) {}
+                    this._vrmPhysicsAccumulator = 0;
+                }
                 // 每帧强制校正 SpringBone 的引用中心与重力，防止库在内部重置造成漂移
                 try {
                     const vrm = this.currentModel;
@@ -1790,15 +1959,20 @@ class VRMManager {
                         const groups = Array.isArray(vrm.springBoneManager.springBoneGroupList)
                             ? vrm.springBoneManager.springBoneGroupList
                             : [];
-                        const jointsCount = Array.isArray(vrm.springBoneManager.joints)
-                            ? vrm.springBoneManager.joints.length
-                            : 0;
+                        // 【修复】优先检测 VRM 1.0 的 springBones，其次检测旧版的 joints
+                        const sm = vrm.springBoneManager;
+                        const jointsCount = (sm.springBones && sm.springBones.size) ||
+                            (sm.joints && sm.joints instanceof Set && sm.joints.size) ||
+                            (Array.isArray(sm.joints) ? sm.joints.length : 0);
                         const groupCount = groups.length;
                         console.log(`SpringBone就绪: joints=${jointsCount}, groups=${groupCount}`);
-                        // 如果管理器存在但为空，视为“无物理”，启用轻量下垂补偿
+                        // 如果管理器存在但为空，原逻辑会启用“无物理头发补偿”。
+                        // 现在按你的建议：强制禁用该补偿，避免刘海前冲/乱飞。
                         if ((jointsCount === 0) && (groupCount === 0)) {
-                            try { this._setupNoPhysicsHairCompensation(vrm); this._noPhysicsHairEnabled = true; } catch (_) { this._noPhysicsHairEnabled = false; }
-                            console.warn('SpringBone 管理器为空，已启用无物理头发补偿');
+                            // 强制禁用这个补偿，防止刘海乱飞
+                            this._noPhysicsHairEnabled = false;
+                            // try { this._setupNoPhysicsHairCompensation(vrm); this._noPhysicsHairEnabled = true; } catch (_) { this._noPhysicsHairEnabled = false; }
+                            console.warn('SpringBone 管理器为空，已强制禁用头发补偿 (FIXED)');
                         } else {
                             this._noPhysicsHairEnabled = false;
                         }
@@ -1822,9 +1996,10 @@ class VRMManager {
                 // 存在物理系统时，关闭无物理头发补偿（若管理器为空，上面已重新开启）
                 if (!this._noPhysicsHairEnabled) this._noPhysicsHairEnabled = false;
             } else {
-                console.warn('VRM模型不包含SpringBone系统');
-                // 无物理系统时，启用轻量下垂补偿
-                try { this._setupNoPhysicsHairCompensation(vrm); this._noPhysicsHairEnabled = true; } catch (_) { this._noPhysicsHairEnabled = false; }
+                console.warn('VRM模型不包含SpringBone系统；已禁用无物理头发补偿');
+                // 无物理系统时，强制禁用无物理头发补偿，避免刘海前冲
+                this._noPhysicsHairEnabled = false;
+                // 如需恢复可重启或将此分支改回调用 _setupNoPhysicsHairCompensation
             }
             
             // 设置自然的待机姿态（修复T-pose）
@@ -1986,19 +2161,22 @@ class VRMManager {
     }
 
     _updateNoPhysicsHair(delta) {
+        // 【修改点1】直接在这里返回，彻底禁止这段逻辑运行
+        return;
+
+        /* --- 以下代码将不再执行，或者你可以把 baseDroop 改为 0 ---
         const arr = this._noSpringHairBones;
         if (!arr || arr.length === 0) return;
         // 基础下垂角度（弧度）与阻尼
-        const baseDroop = -0.35; // ~ -20°，增强下垂以抵抗前冲
-        const lerp = 1 - Math.exp(-8 * delta); // 更快阻尼，减少前向抬头的惯性
+        // 【原问题】这里 -0.35 会导致部分模型的骨骼向前旋转（看起来像飞起来）
+        const baseDroop = 0; // <--- 改成 0，或者保留上面的 return 直接跳过
+        const lerp = 1 - Math.exp(-8 * delta);
         let headPitch = 0;
         try {
             if (this._noSpringHead) {
-                // 读取头部局部旋转的 X 作为俯仰近似
                 headPitch = this._noSpringHead.rotation?.x || 0;
             }
         } catch (_) {}
-        // 根据头部俯仰微调目标角（头部前倾时稍多下垂，后仰时减少）
         const targetX = baseDroop + Math.max(-0.10, Math.min(0.10, -0.30 * headPitch));
         for (const b of arr) {
             try {
@@ -2007,6 +2185,7 @@ class VRMManager {
                 b.quaternion.slerp(target, lerp);
             } catch (_) {}
         }
+        */
     }
 
     // 加载动画库清单，并预载AnimationClip

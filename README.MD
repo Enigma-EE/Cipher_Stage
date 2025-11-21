@@ -2,6 +2,10 @@
 
 
 
+![Project EE](static/header_image.png)
+
+
+
 The quality of AI-generated content is terrible and it’s everywhere. There isn’t an AI virtual streamer on the market that matches what I want, so I’m going to build one.
 
 I want a VTuber that can put on a show, provide more meaningful interactions and entertainment.
@@ -316,3 +320,5 @@ AI → 表情序列,
 要虚拟直播间里跑、跳、翻转，
 
 需要动画蓝图控制器（基于状态机切换动画）。
+
+

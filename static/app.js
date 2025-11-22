@@ -443,9 +443,7 @@ function applyI18NToControlPanels() {
         // 检查是否已存在模型切换按钮
         if (document.getElementById('vrm-model-switch-btn')) return;
         let controlPanel = document.getElementById('vrm-control-panel');
-        // 不再进行兜底创建，统一由 createControlPanels 负责一次性创建
         if (!controlPanel) {
-            console.warn('VRM控制面板未找到，无法添加模型切换按钮');
             return;
         }
         const switchBtn = document.createElement('button');
@@ -510,6 +508,9 @@ function applyI18NToControlPanels() {
         // 更新控制面板显示状态
         if (window.modelManager) {
             window.modelManager.updateControlPanels();
+        }
+        if (!document.getElementById('physics-panel')) {
+            createPhysicsPanel();
         }
     }
     
@@ -725,6 +726,141 @@ function applyI18NToControlPanels() {
         applyI18NToControlPanels();
         try { updatePanelSafeBottom(); } catch (_) {}
     }
+
+    function createPhysicsPanel() {
+        const panel = document.createElement('div');
+        panel.id = 'physics-panel';
+        panel.style.position = 'fixed';
+        panel.style.right = '20px';
+        panel.style.top = '80px';
+        panel.style.zIndex = '1200';
+        panel.style.width = '300px';
+        panel.style.background = 'rgba(20,21,24,0.6)';
+        panel.style.backdropFilter = 'blur(12px) saturate(160%)';
+        panel.style.border = '1px solid rgba(255,255,255,0.08)';
+        panel.style.borderRadius = '10px';
+        panel.style.padding = '10px';
+        panel.style.color = '#fff';
+
+        const title = document.createElement('div');
+        title.textContent = '物理调节';
+        title.style.fontSize = '14px';
+        title.style.marginBottom = '8px';
+        panel.appendChild(title);
+
+        const row = (label, input) => {
+            const r = document.createElement('div');
+            r.style.display = 'flex';
+            r.style.alignItems = 'center';
+            r.style.gap = '8px';
+            r.style.margin = '6px 0';
+            const l = document.createElement('span');
+            l.textContent = label;
+            l.style.flex = '0 0 90px';
+            l.style.fontSize = '12px';
+            r.appendChild(l);
+            r.appendChild(input);
+            return r;
+        };
+
+        const mkSlider = (min, max, step, val) => {
+            const s = document.createElement('input');
+            s.type = 'range';
+            s.min = String(min);
+            s.max = String(max);
+            s.step = String(step);
+            s.value = String(val);
+            s.style.flex = '1';
+            return s;
+        };
+
+        const grav = mkSlider(1.0, 6.0, 0.1, 3.5);
+        const stiff = mkSlider(0.002, 0.02, 0.001, 0.006);
+        const drag = mkSlider(0.3, 1.5, 0.05, 0.6);
+        const coll = mkSlider(0.5, 1.0, 0.05, 0.7);
+        const wind = mkSlider(0.0, 1.0, 0.01, 0.0);
+        const angle = mkSlider(0, 360, 1, 0);
+
+        panel.appendChild(row('重力', grav));
+        panel.appendChild(row('刚度', stiff));
+        panel.appendChild(row('阻尼', drag));
+        panel.appendChild(row('碰撞体', coll));
+        panel.appendChild(row('风强度', wind));
+        panel.appendChild(row('风角度', angle));
+
+        const opts = document.createElement('div');
+        opts.style.display = 'flex';
+        opts.style.gap = '10px';
+        const chkGravity = document.createElement('input');
+        chkGravity.type = 'checkbox';
+        chkGravity.checked = true;
+        const lblGravity = document.createElement('label');
+        lblGravity.textContent = '强制重力';
+        const chkCenter = document.createElement('input');
+        chkCenter.type = 'checkbox';
+        chkCenter.checked = true;
+        const lblCenter = document.createElement('label');
+        lblCenter.textContent = '锁定中心';
+        opts.appendChild(chkGravity);
+        opts.appendChild(lblGravity);
+        opts.appendChild(chkCenter);
+        opts.appendChild(lblCenter);
+        panel.appendChild(opts);
+
+        const btnRow = document.createElement('div');
+        btnRow.style.display = 'flex';
+        btnRow.style.gap = '8px';
+        btnRow.style.marginTop = '8px';
+        const btnSoft = document.createElement('button');
+        btnSoft.textContent = '柔软';
+        const btnStd = document.createElement('button');
+        btnStd.textContent = '标准';
+        const btnStiff = document.createElement('button');
+        btnStiff.textContent = '偏硬';
+        const btnApply = document.createElement('button');
+        btnApply.textContent = '应用';
+        const btnDebug = document.createElement('button');
+        btnDebug.textContent = '打印joints';
+        const btnNoG = document.createElement('button');
+        btnNoG.textContent = '无重力测试';
+        const btnReset = document.createElement('button');
+        btnReset.textContent = '重置物理';
+        btnRow.appendChild(btnSoft);
+        btnRow.appendChild(btnStd);
+        btnRow.appendChild(btnStiff);
+        btnRow.appendChild(btnApply);
+        btnRow.appendChild(btnDebug);
+        btnRow.appendChild(btnNoG);
+        btnRow.appendChild(btnReset);
+        [btnSoft, btnStd, btnStiff, btnApply, btnDebug, btnNoG, btnReset].forEach(b => { b.className = 'control-button'; });
+        panel.appendChild(btnRow);
+
+        const apply = () => {
+            if (!window.vrmManager) return;
+            window.vrmManager.setHairPhysicsConfig({
+                gravityPowerMin: Number(grav.value),
+                stiffnessMax: Number(stiff.value),
+                dragMin: Number(drag.value),
+                colliderScale: Number(coll.value)
+            });
+            window.vrmManager.setSpringForceOptions({
+                forceGravity: !!chkGravity.checked,
+                forceCenter: !!chkCenter.checked
+            });
+            window.vrmManager.applyHairPhysics();
+            window.vrmManager.setWindOptions({ strength: Number(wind.value), angleDeg: Number(angle.value), gust: false });
+        };
+
+        btnSoft.onclick = () => { grav.value = '3.2'; stiff.value = '0.004'; drag.value = '0.7'; coll.value = '0.65'; apply(); };
+        btnStd.onclick = () => { grav.value = '3.5'; stiff.value = '0.006'; drag.value = '0.6'; coll.value = '0.7'; apply(); };
+        btnStiff.onclick = () => { grav.value = '4.2'; stiff.value = '0.012'; drag.value = '0.5'; coll.value = '0.75'; apply(); };
+        btnApply.onclick = apply;
+        btnDebug.onclick = () => { try { window.vrmManager && window.vrmManager.debugSpringBones(); } catch (_) {} };
+        btnNoG.onclick = () => { try { window.vrmManager && window.vrmManager.setNoGravityTest(true); } catch (_) {} };
+        btnReset.onclick = () => { try { window.vrmManager && window.vrmManager.resetSpringBones(); } catch (_) {} };
+
+        document.body.appendChild(panel);
+    }
     
     // 创建VRM控制面板
     function initVRMControls() {
@@ -752,6 +888,9 @@ function applyI18NToControlPanels() {
     // 在页面加载完成后初始化VRM控制面板
     document.addEventListener('DOMContentLoaded', function() {
         initVRMControls();
+        if (!document.getElementById('physics-panel')) {
+            try { createPhysicsPanel(); } catch (_) {}
+        }
     });
     
     function createVRMControls() {

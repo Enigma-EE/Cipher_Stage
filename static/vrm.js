@@ -80,6 +80,18 @@ class VRMManager {
         // 最近一次加载的 GLTF 与 JSON（用于调试扩展与插件是否生效）
         this._lastGltf = null;
         this._lastGltfJson = null;
+
+        this._hairConfig = {
+            gravityPowerMin: 3.5,
+            stiffnessMax: 0.006,
+            dragMin: 0.6,
+            colliderScale: 0.7
+        };
+
+        this._windStrength = 0.0; // 0..1
+        this._windAngleDeg = 0.0; // 0..360, 水平角度，0=+X
+        this._windGust = false;   // 是否随时间起伏
+        this._windPhase = 0.0;
     }
 
     // 兜底：直接从 GLB 文件中解析 JSON chunk（当 GLTFLoader 未暴露 parser.json 时使用）
@@ -156,7 +168,7 @@ class VRMManager {
                 const colliders = group.colliders || group._colliders || [];
                 for (const c of colliders) {
                     if (c.radius !== undefined) {
-                        c.radius *= 0.85; // 缩小 15%
+                        c.radius *= Number(this._hairConfig.colliderScale || 0.7);
                         shrunkColliders++;
                     }
                 }
@@ -165,65 +177,63 @@ class VRMManager {
         console.log(`【PhysicsFix】已缩小 ${shrunkColliders} 个碰撞体半径，防止头发被撑开。`);
 
         // 3. 调整头发重力与刚度
-        const hairKeys = ['hair', 'bang', 'fringe', 'front', 'pony', 'braid', '髪', '发', '刘海'];
         let touched = 0;
 
         for (const j of joints) {
-            // 兼容各种骨骼引用方式
-            const boneNode = j.bone || j.node || j._node;
-            const n = boneNode ? boneNode.name : '';
-            const low = String(n).toLowerCase();
-
-            // 匹配头发
-            const isHair = hairKeys.some(k => low.includes(k));
-            if (!isHair) continue;
-
-            // 获取设置对象
             const s = j.settings || j.setting || j.params || j._settings || j._params;
-
-            if (s) {
-                // 【暴力重力】统一提升，兼容字段别名
-                const gCandidates = ['gravityPower','gravityFactor','gravityScale'];
-                let appliedGravity = false;
-                for (const key of gCandidates) {
-                    if (s[key] !== undefined) { s[key] = Math.max(2.8, parseFloat(s[key]) || 0); appliedGravity = true; }
-                }
-                // 如果没有任何重力字段，尝试在管理器级别再明确一次
-                if (!appliedGravity) {
-                    try {
-                        const mgr = springBoneManager;
-                        const gdir = new THREE.Vector3(0, -1, 0);
-                        if (typeof mgr.setGravity === 'function') mgr.setGravity(gdir);
-                        else if (mgr.gravity && typeof mgr.gravity.copy === 'function') mgr.gravity.copy(gdir);
-                    } catch (_) {}
-                }
-
-                // 【重力方向】强制指向世界坐标下方
-                if (s.gravityDir) {
-                    if (typeof s.gravityDir.set === 'function') {
-                        s.gravityDir.set(0, -1, 0);
-                    } else {
-                        s.gravityDir = { x: 0, y: -1, z: 0 };
-                    }
-                }
-
-                // 【降低刚度】兼容字段别名，让头发更软
-                const stiffCandidates = ['stiffness','stiffnessForce','stiffnessFactor'];
-                for (const key of stiffCandidates) {
-                    if (s[key] !== undefined) { s[key] = Math.min(0.015, parseFloat(s[key]) || 0.5); }
-                }
-
-                // 【增加阻力】兼容 drag 字段别名，收敛摆动
-                const dragCandidates = ['dragForce','drag','dragCoefficient'];
-                for (const key of dragCandidates) {
-                    if (s[key] !== undefined) { s[key] = Math.max(0.8, parseFloat(s[key]) || 0); }
-                }
-
-                touched++;
+            if (!s) continue;
+            const gCandidates = ['gravityPower','gravityFactor','gravityScale'];
+            let appliedGravity = false;
+            for (const key of gCandidates) {
+                if (s[key] !== undefined) { s[key] = Math.max(Number(this._hairConfig.gravityPowerMin || 3.5), parseFloat(s[key]) || 0); appliedGravity = true; }
             }
+            if (!appliedGravity) {
+                try {
+                    const mgr = springBoneManager;
+                    const gdir = new THREE.Vector3(0, -1, 0);
+                    if (typeof mgr.setGravity === 'function') mgr.setGravity(gdir);
+                    else if (mgr.gravity && typeof mgr.gravity.copy === 'function') mgr.gravity.copy(gdir);
+                } catch (_) {}
+            }
+            if (s.gravityDir) {
+                if (typeof s.gravityDir.set === 'function') { s.gravityDir.set(0, -1, 0); }
+                else { s.gravityDir = { x: 0, y: -1, z: 0 }; }
+            }
+            const stiffCandidates = ['stiffness','stiffnessForce','stiffnessFactor'];
+            for (const key of stiffCandidates) {
+                if (s[key] !== undefined) { s[key] = Math.min(Number(this._hairConfig.stiffnessMax || 0.006), parseFloat(s[key]) || 0.5); }
+            }
+            const dragCandidates = ['dragForce','drag','dragCoefficient'];
+            for (const key of dragCandidates) {
+                if (s[key] !== undefined) { s[key] = Math.max(Number(this._hairConfig.dragMin || 0.6), parseFloat(s[key]) || 0); }
+            }
+            touched++;
         }
 
-        console.log(`【PhysicsFix】微调完成！已强制修正 ${touched} 个头发关节的物理参数。`);
+        if (touched === 0) {
+            for (const j of joints) {
+                const s = j.settings || j.setting || j.params || j._settings || j._params;
+                if (!s) continue;
+                const gCandidates = ['gravityPower','gravityFactor','gravityScale'];
+                for (const key of gCandidates) {
+                    if (s[key] !== undefined) { s[key] = Math.max(Number(this._hairConfig.gravityPowerMin || 3.5), parseFloat(s[key]) || 0); }
+                }
+                if (s.gravityDir) {
+                    if (typeof s.gravityDir.set === 'function') { s.gravityDir.set(0, -1, 0); }
+                    else { s.gravityDir = { x: 0, y: -1, z: 0 }; }
+                }
+                const stiffCandidates = ['stiffness','stiffnessForce','stiffnessFactor'];
+                for (const key of stiffCandidates) {
+                    if (s[key] !== undefined) { s[key] = Math.min(Number(this._hairConfig.stiffnessMax || 0.006), parseFloat(s[key]) || 0.5); }
+                }
+                const dragCandidates = ['dragForce','drag','dragCoefficient'];
+                for (const key of dragCandidates) {
+                    if (s[key] !== undefined) { s[key] = Math.max(Number(this._hairConfig.dragMin || 0.6), parseFloat(s[key]) || 0); }
+                }
+            }
+            console.log('【PhysicsFix】未检测到头发关键词，已对所有关节应用保守微调。');
+        }
+        console.log(`【PhysicsFix】微调完成！已强制修正 ${Math.max(touched, 0)} 个头发关节的物理参数。`);
 
         // 额外保障：再次明确管理器重力方向为 -Y
         try {
@@ -239,6 +249,61 @@ class VRMManager {
         if (typeof springBoneManager.reset === 'function') {
             springBoneManager.reset();
         }
+    }
+
+    setHairPhysicsConfig(cfg = {}) {
+        const c = this._hairConfig;
+        if (cfg.gravityPowerMin != null) c.gravityPowerMin = Number(cfg.gravityPowerMin);
+        if (cfg.stiffnessMax != null) c.stiffnessMax = Number(cfg.stiffnessMax);
+        if (cfg.dragMin != null) c.dragMin = Number(cfg.dragMin);
+        if (cfg.colliderScale != null) c.colliderScale = Number(cfg.colliderScale);
+        return c;
+    }
+
+    applyHairPhysics() {
+        const vrm = this.currentModel;
+        const mgr = vrm && vrm.springBoneManager;
+        if (!mgr) return false;
+        this._tuneHairPhysics(mgr);
+        return true;
+    }
+
+    resetSpringBones() {
+        const vrm = this.currentModel;
+        const mgr = vrm && vrm.springBoneManager;
+        if (!mgr) return false;
+        try { if (typeof mgr.reset === 'function') mgr.reset(); } catch (_) {}
+        return true;
+    }
+
+    setWindOptions({ strength = null, angleDeg = null, gust = null } = {}) {
+        if (strength !== null) this._windStrength = Math.max(0, Math.min(1, Number(strength)));
+        if (angleDeg !== null) this._windAngleDeg = ((Number(angleDeg) % 360) + 360) % 360;
+        if (gust !== null) this._windGust = !!gust;
+        return { strength: this._windStrength, angleDeg: this._windAngleDeg, gust: this._windGust };
+    }
+
+    _composeGravityDirWithWind(base = new THREE.Vector3(0, -1, 0), delta = 0) {
+        let s = this._windStrength || 0;
+        if (this._windGust) {
+            this._windPhase = (this._windPhase || 0) + delta;
+            // 轻微起伏 0.7~1.0
+            const gust = 0.85 + 0.15 * Math.sin(this._windPhase * 0.7);
+            s *= gust;
+        }
+        if (s <= 0.0001) return base.clone();
+        const a = (this._windAngleDeg || 0) * Math.PI / 180;
+        const wx = Math.cos(a) * s;
+        const wz = Math.sin(a) * s;
+        const g = new THREE.Vector3(base.x + wx, base.y, base.z + wz);
+        g.normalize();
+        return g;
+    }
+
+    setSpringForceOptions({ forceGravity = null, forceCenter = null } = {}) {
+        if (forceGravity !== null) this._forceSpringGravity = !!forceGravity;
+        if (forceCenter !== null) this._forceSpringCenter = !!forceCenter;
+        return { forceGravity: this._forceSpringGravity, forceCenter: this._forceSpringCenter };
     }
 
     // 打印当前场景的节点名称与层次（最多 max 条），用于调试骨骼命名
@@ -292,19 +357,9 @@ class VRMManager {
         try {
             const mgr = vrm?.springBoneManager;
             if (!mgr) return;
-            // 设置中心为稳定的世界参考（优先 hips，其次模型根），避免头部动画改变重力方向
-            let centerNode = null;
-            try {
-                const hum = vrm.humanoid;
-                if (hum && typeof hum.getNormalizedBoneNode === 'function') {
-                    centerNode = hum.getNormalizedBoneNode('hips') || vrm.scene; // hips 更稳；无则使用根
-                }
-            } catch (_) { centerNode = vrm.scene; }
-            if (!centerNode) centerNode = vrm.scene;
-            if (this._forceSpringCenter && centerNode) {
-                if ('center' in mgr && mgr.center !== centerNode) {
-                    try { mgr.center = centerNode; console.log('SpringBone中心设为:', centerNode.name || 'scene-root'); } catch (_) {}
-                }
+            let centerNode = vrm.scene;
+            if ('center' in mgr && mgr.center !== centerNode) {
+                try { mgr.center = centerNode; console.log('SpringBone中心设为: scene-root'); } catch (_) {}
             }
             // 再次明确重力方向（某些模型重力可能默认沿Z）
             try {
@@ -1064,23 +1119,19 @@ class VRMManager {
                     const vrm = this.currentModel;
                     const mgr = vrm && vrm.springBoneManager;
                     if (mgr) {
-                        // 重力始终指向世界-Y（避免随中心旋转而产生前向分量）
-                        const gdir = new THREE.Vector3(0, -1, 0);
+                        // 重力方向叠加风力（水平向量），再归一化
+                        const base = new THREE.Vector3(0, -1, 0);
+                        const gdir = this._composeGravityDirWithWind(base, delta);
                         if (!this._noGravityTest && this._forceSpringGravity) {
                             if (typeof mgr.setGravity === 'function') mgr.setGravity(gdir);
                             else if (mgr.gravity && typeof mgr.gravity.copy === 'function') mgr.gravity.copy(gdir);
                         }
                         // 强制中心为稳定节点（hips 或模型根），避免头部动画影响重力方向
-                        if (this._forceSpringCenter) {
-                            if (!this._springCenterNode) {
-                                try {
-                                    const hum = vrm.humanoid;
-                                    this._springCenterNode = hum?.getNormalizedBoneNode?.('hips') || vrm.scene || null;
-                                } catch (_) { this._springCenterNode = vrm.scene || null; }
-                            }
-                            if (this._springCenterNode && mgr.center !== this._springCenterNode) {
-                                try { mgr.center = this._springCenterNode; } catch (_) {}
-                            }
+                        if (!this._springCenterNode) {
+                            this._springCenterNode = vrm.scene || null;
+                        }
+                        if (this._springCenterNode && mgr.center !== this._springCenterNode) {
+                            try { mgr.center = this._springCenterNode; } catch (_) {}
                         }
                     }
                 } catch (_) {}
@@ -1969,10 +2020,8 @@ class VRMManager {
                         // 如果管理器存在但为空，原逻辑会启用“无物理头发补偿”。
                         // 现在按你的建议：强制禁用该补偿，避免刘海前冲/乱飞。
                         if ((jointsCount === 0) && (groupCount === 0)) {
-                            // 强制禁用这个补偿，防止刘海乱飞
-                            this._noPhysicsHairEnabled = false;
-                            // try { this._setupNoPhysicsHairCompensation(vrm); this._noPhysicsHairEnabled = true; } catch (_) { this._noPhysicsHairEnabled = false; }
-                            console.warn('SpringBone 管理器为空，已强制禁用头发补偿 (FIXED)');
+                            try { this._setupNoPhysicsHairCompensation(vrm); this._noPhysicsHairEnabled = true; } catch (_) { this._noPhysicsHairEnabled = false; }
+                            console.warn('SpringBone 管理器为空，启用轻量下垂补偿');
                         } else {
                             this._noPhysicsHairEnabled = false;
                         }
@@ -2161,23 +2210,13 @@ class VRMManager {
     }
 
     _updateNoPhysicsHair(delta) {
-        // 【修改点1】直接在这里返回，彻底禁止这段逻辑运行
-        return;
-
-        /* --- 以下代码将不再执行，或者你可以把 baseDroop 改为 0 ---
         const arr = this._noSpringHairBones;
         if (!arr || arr.length === 0) return;
-        // 基础下垂角度（弧度）与阻尼
-        // 【原问题】这里 -0.35 会导致部分模型的骨骼向前旋转（看起来像飞起来）
-        const baseDroop = 0; // <--- 改成 0，或者保留上面的 return 直接跳过
         const lerp = 1 - Math.exp(-8 * delta);
         let headPitch = 0;
-        try {
-            if (this._noSpringHead) {
-                headPitch = this._noSpringHead.rotation?.x || 0;
-            }
-        } catch (_) {}
-        const targetX = baseDroop + Math.max(-0.10, Math.min(0.10, -0.30 * headPitch));
+        try { if (this._noSpringHead) { headPitch = this._noSpringHead.rotation?.x || 0; } } catch (_) {}
+        const baseDroop = -0.06;
+        const targetX = baseDroop + Math.max(-0.05, Math.min(0.05, -0.20 * headPitch));
         for (const b of arr) {
             try {
                 const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(targetX, 0, 0, 'XYZ'));
@@ -2185,7 +2224,6 @@ class VRMManager {
                 b.quaternion.slerp(target, lerp);
             } catch (_) {}
         }
-        */
     }
 
     // 加载动画库清单，并预载AnimationClip
@@ -2205,7 +2243,11 @@ class VRMManager {
             // 使用与当前渲染同源的 THREE 实例的 GLTFLoader，避免多实例导致绑定失败
             const LoaderClass = (window.THREE && window.THREE.GLTFLoader) || window.GLTFLoader || window.GLTFLoaderModule;
             if (!LoaderClass) throw new Error('GLTFLoader 未就绪');
+            const PluginClass = window.VRMAnimationLoaderPluginModule || window.VRMAnimationLoaderPlugin;
             const loader = new LoaderClass();
+            if (PluginClass && typeof loader.register === 'function') {
+                loader.register((parser) => new PluginClass(parser));
+            }
             for (const item of manifest.animations) {
                 const { name, file, defaultSpeed = 1.0 } = item;
                 if (!name || !file) continue;
@@ -2250,21 +2292,40 @@ class VRMManager {
                                     let processedClips = clips;
                                     const isVRMA = (item.type && String(item.type).toLowerCase() === 'vrma') || String(candidateUrl).toLowerCase().endsWith('.vrma');
                                     if (isVRMA) {
-                                        console.warn('检测到VRMA文件，当前库未内置解析器，需外部支持或离线重定向');
-                                        // 保持原始clips以便后续回退；当引入VRMA支持库后可在此处进行转换
+                                        let vrma = (gltf && gltf.userData) ? gltf.userData.vrma : null;
+                                        if (!vrma && Array.isArray(gltf?.userData?.vrmAnimations) && gltf.userData.vrmAnimations.length > 0) {
+                                            vrma = gltf.userData.vrmAnimations[0];
+                                        }
+                                        if (!vrma) {
+                                            const json = gltf?.parser?.json || {};
+                                            let vrmaExt = json?.extensions?.VRMC_vrm_animation;
+                                            if (!vrmaExt && Array.isArray(json?.animations)) {
+                                                for (const anim of json.animations) {
+                                                    const ext = anim?.extensions?.VRMC_vrm_animation;
+                                                    if (ext) { vrmaExt = ext; break; }
+                                                }
+                                            }
+                                            vrma = vrmaExt || null;
+                                        }
+                                        if (vrma && typeof window.createVRMAnimationClip === 'function' && this.currentModel && this.currentModel.humanoid) {
+                                            let clipFromExt = window.createVRMAnimationClip(vrma, this.currentModel);
+                                            if (clipFromExt && typeof clipFromExt.toJSON === 'function' && THREE?.AnimationClip?.parse) {
+                                                const json = clipFromExt.toJSON();
+                                                clipFromExt = THREE.AnimationClip.parse(json);
+                                            }
+                                            processedClips = [clipFromExt];
+                                        }
                                     }
 
                                     this.animationLibrary[name] = { clips: processedClips, meta: item };
                                     console.log(`动画clip加载成功: ${name}, 片段数:`, clips.length);
-                                    // 不再在此预创建 Action；让 playClip 基于最新（可能已重定向）的 clip 创建 Action
                                 } else {
                                     const isVRMA = String(candidateUrl).toLowerCase().endsWith('.vrma');
                                     if (isVRMA) {
-                                        console.warn(`VRMA文件未解析为clips: ${candidateUrl}。请引入支持库或提供已重定向的GLB`);
+                                        console.warn(`VRMA文件未解析为clips: ${candidateUrl}`);
                                     } else {
                                         console.warn(`动画文件不包含clips: ${candidateUrl}`);
                                     }
-                                    // 回退：仍然登记到动画库以便填充按钮并走程序化动画
                                     if (!this.animationLibrary[name]) {
                                         this.animationLibrary[name] = { clips: [], meta: item };
                                     }

@@ -731,9 +731,10 @@ function applyI18NToControlPanels() {
         const panel = document.createElement('div');
         panel.id = 'physics-panel';
         panel.style.position = 'fixed';
-        panel.style.right = '20px';
-        panel.style.top = '80px';
-        panel.style.zIndex = '1200';
+        panel.style.right = '12px';
+        panel.style.top = '120px';
+        panel.style.zIndex = '1400';
+        panel.style.pointerEvents = 'auto';
         panel.style.width = '300px';
         panel.style.background = 'rgba(20,21,24,0.6)';
         panel.style.backdropFilter = 'blur(12px) saturate(160%)';
@@ -780,6 +781,7 @@ function applyI18NToControlPanels() {
         const coll = mkSlider(0.5, 1.0, 0.05, 0.7);
         const wind = mkSlider(0.0, 1.0, 0.01, 0.0);
         const angle = mkSlider(0, 360, 1, 0);
+        const droop = mkSlider(0.0, 2.0, 0.05, 0.0);
 
         panel.appendChild(row('重力', grav));
         panel.appendChild(row('刚度', stiff));
@@ -787,6 +789,7 @@ function applyI18NToControlPanels() {
         panel.appendChild(row('碰撞体', coll));
         panel.appendChild(row('风强度', wind));
         panel.appendChild(row('风角度', angle));
+        panel.appendChild(row('下垂强度', droop));
 
         const opts = document.createElement('div');
         opts.style.display = 'flex';
@@ -806,6 +809,38 @@ function applyI18NToControlPanels() {
         opts.appendChild(chkCenter);
         opts.appendChild(lblCenter);
         panel.appendChild(opts);
+
+        const positionPhysicsPanel = () => {
+            try {
+                const lc = document.getElementById('vrm-light-controls');
+                const agentPanel = document.getElementById('agent-panel');
+                let baseTop = 120;
+                let baseRight = 12;
+                if (lc) {
+                    const r = lc.getBoundingClientRect();
+                    baseTop = Math.round(r.top);
+                    // 与渲染面板并排行：物理面板放在其左侧
+                    baseRight = 12 + Math.max(0, Math.round(r.width) + 12);
+                }
+                if (agentPanel) {
+                    const a = agentPanel.getBoundingClientRect();
+                    baseTop = Math.max(baseTop, Math.round(a.bottom) + 12);
+                }
+                // 视口保护：避免与底部主控制面板重叠
+                const controlPanel = document.getElementById('vrm-control-panel');
+                if (controlPanel) {
+                    const c = controlPanel.getBoundingClientRect();
+                    const panelHeight = panel.offsetHeight || 260;
+                    if (baseTop + panelHeight > c.top - 10) {
+                        baseTop = Math.max(80, Math.round(c.top - panelHeight - 10));
+                    }
+                }
+                panel.style.top = baseTop + 'px';
+                panel.style.right = baseRight + 'px';
+            } catch (_) {}
+        };
+        positionPhysicsPanel();
+        try { window.addEventListener('resize', positionPhysicsPanel); } catch (_) {}
 
         const btnRow = document.createElement('div');
         btnRow.style.display = 'flex';
@@ -843,12 +878,17 @@ function applyI18NToControlPanels() {
                 dragMin: Number(drag.value),
                 colliderScale: Number(coll.value)
             });
-            window.vrmManager.setSpringForceOptions({
-                forceGravity: !!chkGravity.checked,
-                forceCenter: !!chkCenter.checked
+            window.vrmManager.forceSpringPhysics({
+                gravity: !!chkGravity.checked,
+                center: !!chkCenter.checked
             });
             window.vrmManager.applyHairPhysics();
+            if (typeof window.vrmManager.setNoPhysicsDroopIntensity === 'function') {
+                window.vrmManager.setNoPhysicsDroopIntensity(Number(droop.value));
+            }
             window.vrmManager.setWindOptions({ strength: Number(wind.value), angleDeg: Number(angle.value), gust: false });
+            try { window.vrmManager.setNoGravityTest(false); } catch (_) {}
+            window.vrmManager.resetSpringBones();
         };
 
         btnSoft.onclick = () => { grav.value = '3.2'; stiff.value = '0.004'; drag.value = '0.7'; coll.value = '0.65'; apply(); };
@@ -856,7 +896,7 @@ function applyI18NToControlPanels() {
         btnStiff.onclick = () => { grav.value = '4.2'; stiff.value = '0.012'; drag.value = '0.5'; coll.value = '0.75'; apply(); };
         btnApply.onclick = apply;
         btnDebug.onclick = () => { try { window.vrmManager && window.vrmManager.debugSpringBones(); } catch (_) {} };
-        btnNoG.onclick = () => { try { window.vrmManager && window.vrmManager.setNoGravityTest(true); } catch (_) {} };
+        btnNoG.onclick = () => { try { const cur = !!(window.vrmManager && window.vrmManager._noGravityTest); window.vrmManager && window.vrmManager.setNoGravityTest(!cur); } catch (_) {} };
         btnReset.onclick = () => { try { window.vrmManager && window.vrmManager.resetSpringBones(); } catch (_) {} };
 
         document.body.appendChild(panel);

@@ -83,15 +83,17 @@ class VRMManager {
 
         this._hairConfig = {
             gravityPowerMin: 3.5,
-            stiffnessMax: 0.006,
-            dragMin: 0.6,
-            colliderScale: 0.7
+            stiffnessMax: 1.5,
+            dragMin: 0.4,
+            colliderScale: 0.5
         };
 
         this._windStrength = 0.0; // 0..1
         this._windAngleDeg = 0.0; // 0..360, 水平角度，0=+X
         this._windGust = false;   // 是否随时间起伏
         this._windPhase = 0.0;
+        this._noPhysDroopIntensity = 0.0;
+        this._noPhysPhase = 0.0;
     }
 
     // 兜底：直接从 GLB 文件中解析 JSON chunk（当 GLTFLoader 未暴露 parser.json 时使用）
@@ -133,8 +135,6 @@ class VRMManager {
             return;
         }
 
-        // 1. 暴力获取骨骼列表 (兼容公开属性 joints/springBones 和私有属性 _joints)
-        // 日志显示你的管理器里有 _joints，这很关键
         const rawJoints = springBoneManager.springBones ||
                           springBoneManager.joints ||
                           springBoneManager._joints ||
@@ -201,7 +201,12 @@ class VRMManager {
             }
             const stiffCandidates = ['stiffness','stiffnessForce','stiffnessFactor'];
             for (const key of stiffCandidates) {
-                if (s[key] !== undefined) { s[key] = Math.min(Number(this._hairConfig.stiffnessMax || 0.006), parseFloat(s[key]) || 0.5); }
+                if (s[key] !== undefined) {
+                    const val = parseFloat(s[key]);
+                    const safeStiffness = Number.isFinite(val) ? val : 0.5;
+                    const targetStiffness = Math.max(0.2, Math.min(2.0, safeStiffness));
+                    s[key] = targetStiffness;
+                }
             }
             const dragCandidates = ['dragForce','drag','dragCoefficient'];
             for (const key of dragCandidates) {
@@ -224,7 +229,12 @@ class VRMManager {
                 }
                 const stiffCandidates = ['stiffness','stiffnessForce','stiffnessFactor'];
                 for (const key of stiffCandidates) {
-                    if (s[key] !== undefined) { s[key] = Math.min(Number(this._hairConfig.stiffnessMax || 0.006), parseFloat(s[key]) || 0.5); }
+                    if (s[key] !== undefined) {
+                        const val = parseFloat(s[key]);
+                        const safeStiffness = Number.isFinite(val) ? val : 0.5;
+                        const targetStiffness = Math.max(0.2, Math.min(2.0, safeStiffness));
+                        s[key] = targetStiffness;
+                    }
                 }
                 const dragCandidates = ['dragForce','drag','dragCoefficient'];
                 for (const key of dragCandidates) {
@@ -281,6 +291,11 @@ class VRMManager {
         if (angleDeg !== null) this._windAngleDeg = ((Number(angleDeg) % 360) + 360) % 360;
         if (gust !== null) this._windGust = !!gust;
         return { strength: this._windStrength, angleDeg: this._windAngleDeg, gust: this._windGust };
+    }
+
+    setNoPhysicsDroopIntensity(v = 0) {
+        this._noPhysDroopIntensity = Math.max(0, Math.min(2.0, Number(v) || 0));
+        return this._noPhysDroopIntensity;
     }
 
     _composeGravityDirWithWind(base = new THREE.Vector3(0, -1, 0), delta = 0) {
@@ -429,7 +444,7 @@ class VRMManager {
         } catch (e) { console.warn('设置无重力测试模式失败:', e); }
     }
 
-    // 调试助手：打印 SpringBone 的基本信息（兼容 VRM1 Set/Array 以及 springs/colliderGroups）
+    // 调试助手：打印 SpringBone 的基本信息并列出部分 joints 名称（兼容 VRM1 Set/Array）
     debugSpringBones() {
         try {
             const vrm = this.currentModel;
@@ -473,9 +488,30 @@ class VRMManager {
             try {
                 const center = mgr.center || null;
                 const gdir = mgr.gravity || null;
-                console.log('[SpringBone] center:', center ? (center.name || center.uuid || 'object') : null);
-                if (gdir) console.log('[SpringBone] gravity:', gdir.x?.toFixed?.(2), gdir.y?.toFixed?.(2), gdir.z?.toFixed?.(2));
+            console.log('[SpringBone] center:', center ? (center.name || center.uuid || 'object') : null);
+            if (gdir) console.log('[SpringBone] gravity:', gdir.x?.toFixed?.(2), gdir.y?.toFixed?.(2), gdir.z?.toFixed?.(2));
             } catch (_) {}
+
+            // 打印部分 joints 名称与关键参数，并统计可能属于头发的关节数量
+            try {
+                let joints = [];
+                const jv = mgr.joints;
+                if (jv instanceof Set) joints = Array.from(jv);
+                else if (Array.isArray(jv)) joints = jv;
+                const hairKeys = ['hair','bang','fringe','front','pony','braid','髪','发','刘海'];
+                let hairCount = 0;
+                const limit = Math.min(40, joints.length);
+                for (let i = 0; i < limit; i++) {
+                    const j = joints[i];
+                    const name = (j?.bone?.name || j?.node?.name || j?._node?.name || '(no-name)');
+                    const s = j?.settings || j?._settings || j?.params || j?._params || {};
+                    const info = { name, stiffness: s.stiffness, dragForce: s.dragForce, gravityPower: s.gravityPower };
+                    console.log('[SpringJoint]', info);
+                    const low = String(name || '').toLowerCase();
+                    if (hairKeys.some(k => low.includes(k))) hairCount++;
+                }
+                console.log('关节打印数:', limit, '可能为头发的关节数:', hairCount);
+            } catch (e) { console.warn('打印 joints 失败:', e); }
         } catch (e) { console.warn('打印 SpringBone 信息失败:', e); }
     }
 
@@ -2215,8 +2251,11 @@ class VRMManager {
         const lerp = 1 - Math.exp(-8 * delta);
         let headPitch = 0;
         try { if (this._noSpringHead) { headPitch = this._noSpringHead.rotation?.x || 0; } } catch (_) {}
-        const baseDroop = -0.06;
-        const targetX = baseDroop + Math.max(-0.05, Math.min(0.05, -0.20 * headPitch));
+        const k = this._noPhysDroopIntensity || 0;
+        this._noPhysPhase = (this._noPhysPhase || 0) + delta * 1.5;
+        const baseDroop = -0.12 * k;
+        const osc = Math.sin(this._noPhysPhase) * 0.03 * k;
+        const targetX = baseDroop + osc + Math.max(-0.05, Math.min(0.05, -0.20 * headPitch));
         for (const b of arr) {
             try {
                 const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(targetX, 0, 0, 'XYZ'));

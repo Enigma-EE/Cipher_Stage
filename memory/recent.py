@@ -9,7 +9,7 @@ from config.api import CORRECTION_MODEL
 from config.prompts_sys import recent_history_manager_prompt, detailed_recent_history_manager_prompt, further_summarize_prompt, history_review_prompt
 
 class CompressedRecentHistoryManager:
-    def __init__(self, max_history_length=10):
+    def __init__(self, max_history_length=64):
         # 通过get_character_data获取相关变量
         _, _, _, _, name_mapping, _, _, _, _, recent_log = get_character_data()
         # 统一将路径规范化为项目内存模块的绝对路径，并确保目录存在
@@ -19,23 +19,38 @@ class CompressedRecentHistoryManager:
         recent_log_abs = {}
         for k, v in recent_log.items():
             recent_log_abs[k] = os.path.join(base_store_dir, os.path.basename(v))
-        # 修复API key类型问题
         api_key = OPENROUTER_API_KEY if OPENROUTER_API_KEY and OPENROUTER_API_KEY != '' else None
-        # 如果没有配置 API Key，避免在启动阶段强行初始化远程 LLM，允许系统以降级模式运行
+        disable_remote = False
+        cfg_window = None
+        try:
+            cfg_path = os.path.join(os.path.dirname(__file__), '..', 'config', 'core_config.json')
+            if os.path.exists(cfg_path):
+                with open(cfg_path, 'r', encoding='utf-8') as f:
+                    cfg = json.load(f)
+                disable_remote = bool(cfg.get('recent_memory_disable_remote_summary', False))
+                try:
+                    cfg_window = int(cfg.get('recent_cache_window', None))
+                except Exception:
+                    cfg_window = None
+        except Exception:
+            disable_remote = False
+
         self.llm = None
         self.review_llm = None
         try:
-            if api_key:
+            if api_key and not disable_remote:
                 self.llm = ChatOpenAI(model=SUMMARY_MODEL, base_url=OPENROUTER_URL, api_key=api_key, temperature=0.3)
                 self.review_llm = ChatOpenAI(model=CORRECTION_MODEL, base_url=OPENROUTER_URL, api_key=api_key, temperature=0.1)
         except Exception as e:
             print("初始化摘要/审阅模型失败：", e)
             self.llm = None
             self.review_llm = None
-        self.max_history_length = max_history_length
+        self.max_history_length = (cfg_window if isinstance(cfg_window, int) and cfg_window > 0 else max_history_length if max_history_length > 0 else 128)
         self.log_file_path = recent_log_abs
         self.name_mapping = name_mapping
         self.user_histories = {}
+        self.session_summaries = {}
+        self.last_summary_index = {}
         for ln in self.log_file_path:
             # 确保父目录存在
             dirname = os.path.dirname(self.log_file_path[ln])
@@ -45,6 +60,8 @@ class CompressedRecentHistoryManager:
                     self.user_histories[ln] = messages_from_dict(json.load(f))
             else:
                 self.user_histories[ln] = []
+            self.session_summaries[ln] = []
+            self.last_summary_index[ln] = 0
 
 
     def update_history(self, new_messages, lanlan_name, detailed=False):
@@ -56,12 +73,15 @@ class CompressedRecentHistoryManager:
             self.user_histories[lanlan_name].extend(new_messages)
 
             if len(self.user_histories[lanlan_name]) > self.max_history_length:
-                # 压缩旧消息
-                to_compress = self.user_histories[lanlan_name][:-self.max_history_length+1]
-                compressed = [self.compress_history(to_compress, lanlan_name, detailed)[0]]
-
-                # 只保留最近的max_history_length条消息
-                self.user_histories[lanlan_name] = compressed + self.user_histories[lanlan_name][-self.max_history_length+1:]
+                tail_start = len(self.user_histories[lanlan_name]) - self.max_history_length + 1
+                overflow_start = self.last_summary_index.get(lanlan_name, 0)
+                if overflow_start < tail_start:
+                    to_compress = self.user_histories[lanlan_name][overflow_start:tail_start]
+                    summary_msg, _ = self.compress_history(to_compress, lanlan_name, detailed)
+                    self.session_summaries[lanlan_name].append(summary_msg)
+                    self.last_summary_index[lanlan_name] = tail_start
+                recent_tail = self.user_histories[lanlan_name][-self.max_history_length+1:]
+                self.user_histories[lanlan_name] = self.session_summaries[lanlan_name] + recent_tail
         except Exception as e:
             print("Error when updating history: ", e)
             import traceback

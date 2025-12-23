@@ -1431,6 +1431,40 @@ async def get_recent_file(filename: str):
         content = f.read()
     return {"content": content}
 
+@app.get('/api/memory/compact_config')
+async def api_get_compact_config():
+    try:
+        async with httpx.AsyncClient(timeout=2.0, trust_env=False) as client:
+            r = await client.get(f"http://127.0.0.1:{MEMORY_SERVER_PORT}/compact_config")
+            return r.json()
+    except Exception as e:
+        try:
+            ms_path = os.path.join(os.path.dirname(__file__), "memory_server.py")
+            subprocess.Popen([sys.executable, ms_path, "--enable-shutdown"], stdout=None, stderr=None)
+            await asyncio.sleep(0.8)
+            async with httpx.AsyncClient(timeout=2.0, trust_env=False) as client:
+                r = await client.get(f"http://127.0.0.1:{MEMORY_SERVER_PORT}/compact_config")
+                return r.json()
+        except Exception as e2:
+            return {"success": False, "error": str(e2)}
+
+@app.post('/api/memory/compact_config')
+async def api_set_compact_config(payload: dict):
+    try:
+        async with httpx.AsyncClient(timeout=3.0, trust_env=False) as client:
+            r = await client.post(f"http://127.0.0.1:{MEMORY_SERVER_PORT}/compact_config", json=payload)
+            return r.json()
+    except Exception as e:
+        try:
+            ms_path = os.path.join(os.path.dirname(__file__), "memory_server.py")
+            subprocess.Popen([sys.executable, ms_path, "--enable-shutdown"], stdout=None, stderr=None)
+            await asyncio.sleep(0.8)
+            async with httpx.AsyncClient(timeout=3.0, trust_env=False) as client:
+                r = await client.post(f"http://127.0.0.1:{MEMORY_SERVER_PORT}/compact_config", json=payload)
+                return r.json()
+        except Exception as e2:
+            return {"success": False, "error": str(e2)}
+
 @app.get("/api/live2d/model_config/{model_name}")
 async def get_model_config(model_name: str):
     """获取指定Live2D模型的model3.json配置"""

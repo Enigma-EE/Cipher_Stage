@@ -71,6 +71,11 @@ Upstream remains Live2D-first for structure and demos. This repo expands 3D capa
   - `python main_server.py` (main service)
   - optional: `python memory_server.py` (memory service)
 
+- Option C: use bundled virtualenv
+  - `./env/Scripts/python.exe main_server.py` (main service)
+  - optional: `./env/Scripts/python.exe memory_server.py` (memory service)
+  - visit `http://127.0.0.1:48922/index`
+
 ### VRM Usage Guide
 - Replace default model: put VRM in `static` 
 - Play VRM animations: place `.vrma` files in `static/animations/` 
@@ -197,6 +202,44 @@ MIT license. You may use, modify, and distribute the code and binaries, preservi
   - `python main_server.py`（主服务）
   - 可选：`python memory_server.py`（记忆服务）
 
+- 方式 C：使用项目自带虚拟环境启动
+  - `./env/Scripts/python.exe main_server.py`（主服务）
+  - 可选：`./env/Scripts/python.exe memory_server.py`（记忆服务）
+  - 访问 `http://127.0.0.1:48922/index`
+
+## 前端面板说明
+
+### 物理调节（Physics）
+- 作用：调整 VRM SpringBone 的重力、刚度、阻尼、碰撞体缩放与风力；并提供快速预设与调试按钮。
+- 主要控件：
+  - 重力/刚度/阻尼/碰撞体/风强度/风角度/下垂强度：对应数值滑杆。
+  - 强制重力、锁定中心：确保物理重力方向与参考中心稳定，避免发丝前冲。
+  - 预设与操作：柔软/标准/偏硬、应用、打印 joints、无重力测试、重置物理。
+- 用法：调整后点击“应用”，如需恢复模型默认物理点击“重置物理”。
+
+### VRM 控制（VRM Control）
+- 作用：显示/隐藏模型、调整模型缩放，后续可扩展动画与渲染控制。
+- 用法：点击“隐藏/显示”，用“+/-”缩放查看大小信息。
+
+### Live2D 控制（Live2D Control）
+- 作用：在 Live2D 管线启用时进行基础动作与显示管理（与 VRM 控制互斥显示）。
+
+### 聊天框（Chat）与侧边栏（Sidebar）
+- 作用：对话、状态与操作入口。支持最小化、拖拽与定位记忆。
+- 用法：点击“-”最小化；点击最小化后的块可还原；支持拖拽移动与右下角缩放。
+
+### 归档压缩与合并设置（Archive Compact & Merge）
+- 作用：对聊天记录/内存片段按阈值进行压缩与合并，降低存储体积并保持语义摘要。
+- 主要字段：
+  - 启用：打开/关闭压缩合并任务。
+  - 行阈值/大小阈值(MB)：触发压缩的行数或累计文件大小阈值。
+  - 间隔(s)：任务轮询/执行的时间间隔。
+  - 开始/结束小时：仅在设置的时间窗内执行，避免直播时段的干扰。
+  - 合并后删除分片：启用后合并完成会清理旧分片文件。
+- 提示：点击“刷新”获取当前后端配置；修改后点“保存”。
+
+> 面板均支持拖拽移动与位置/尺寸记忆；最小化按钮位于右上角，点击即可还原或折叠。
+
 ## 3D 模型使用指南（VRM）
 
 - 替换默认模型：将VRM 文件放置到 `static`
@@ -321,4 +364,20 @@ AI → 表情序列,
 
 需要动画蓝图控制器（基于状态机切换动画）。
 
+### Optimization Checklist
+- ~~Make cross-server writes non-blocking (renew/process)~~ (`main_helper/cross_server.py`)
+- ~~Enable local semantic memory with Chroma + Sentence-Transformers~~ (`memory/semantic.py`, `memory_server.py`)
+- ~~Increase recent cache window and adopt layered memo~~ (`memory/recent.py`)
+- ~~Optimize file IO: archive default gzip, append/compact~~ (`memory_server.py`, `memory/recent.py`)
+- ~~Asynchronous batch renew/process with short timeouts~~ (`memory_server.py`)
+- ~~Prebuild initial prompt during session bootstrap~~ (`main_helper/core.py`, `main_server.py`)
+- ~~Keep memory server resident and reuse client pools~~ (`main_server.py`, `main_helper/cross_server.py`)
 
+## 优化清单
+- ~~跨服务器写入改为非阻塞（renew/process）~~（`main_helper/cross_server.py`）
+- ~~启用本地语义记忆（Chroma + Sentence-Transformers）~~（`memory/semantic.py`、`memory_server.py`）
+- ~~提升近期缓存窗口并采用分层摘要~~（`memory/recent.py`）
+- ~~文件 IO 优化：默认 gzip 归档、追加写与定期整合~~（`memory_server.py`、`memory/recent.py`）
+- ~~异步批处理 renew/process 并设置短超时~~（`memory_server.py`）
+- ~~会话启动阶段预构建初始提示~~（`main_helper/core.py`、`main_server.py`）
+- ~~记忆服务器常驻并重用连接池~~（`main_server.py`、`main_helper/cross_server.py`）

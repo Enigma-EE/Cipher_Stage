@@ -731,8 +731,8 @@ function applyI18NToControlPanels() {
         const panel = document.createElement('div');
         panel.id = 'physics-panel';
         panel.style.position = 'fixed';
-        panel.style.right = '12px';
-        panel.style.top = '120px';
+        panel.style.right = '20px';
+        panel.style.bottom = 'calc(var(--panel-safe-bottom, 240px))';
         panel.style.zIndex = '1400';
         panel.style.pointerEvents = 'auto';
         panel.style.width = '300px';
@@ -741,13 +741,34 @@ function applyI18NToControlPanels() {
         panel.style.border = '1px solid rgba(255,255,255,0.08)';
         panel.style.borderRadius = '10px';
         panel.style.padding = '10px';
+        panel.style.boxSizing = 'border-box';
         panel.style.color = '#fff';
+        panel.style.userSelect = 'none';
 
         const title = document.createElement('div');
         title.textContent = '物理调节';
         title.style.fontSize = '14px';
         title.style.marginBottom = '8px';
+        title.style.cursor = 'move';
+        title.style.whiteSpace = 'nowrap';
+        title.style.overflow = 'hidden';
+        title.style.textOverflow = 'ellipsis';
+        title.id = 'physics-title';
         panel.appendChild(title);
+
+        const resizer = document.createElement('div');
+        resizer.style.position = 'absolute';
+        resizer.style.right = '6px';
+        resizer.style.bottom = '6px';
+        resizer.style.width = '12px';
+        resizer.style.height = '12px';
+        resizer.style.background = 'rgba(255,255,255,0.18)';
+        resizer.style.borderRadius = '3px';
+        resizer.style.cursor = 'se-resize';
+        resizer.id = 'physics-resize';
+        const body = document.createElement('div');
+        body.id = 'physics-body';
+        panel.appendChild(body);
 
         const row = (label, input) => {
             const r = document.createElement('div');
@@ -783,13 +804,13 @@ function applyI18NToControlPanels() {
         const angle = mkSlider(0, 360, 1, 0);
         const droop = mkSlider(0.0, 2.0, 0.05, 0.0);
 
-        panel.appendChild(row('重力', grav));
-        panel.appendChild(row('刚度', stiff));
-        panel.appendChild(row('阻尼', drag));
-        panel.appendChild(row('碰撞体', coll));
-        panel.appendChild(row('风强度', wind));
-        panel.appendChild(row('风角度', angle));
-        panel.appendChild(row('下垂强度', droop));
+        body.appendChild(row('重力', grav));
+        body.appendChild(row('刚度', stiff));
+        body.appendChild(row('阻尼', drag));
+        body.appendChild(row('碰撞体', coll));
+        body.appendChild(row('风强度', wind));
+        body.appendChild(row('风角度', angle));
+        body.appendChild(row('下垂强度', droop));
 
         const opts = document.createElement('div');
         opts.style.display = 'flex';
@@ -808,44 +829,95 @@ function applyI18NToControlPanels() {
         opts.appendChild(lblGravity);
         opts.appendChild(chkCenter);
         opts.appendChild(lblCenter);
-        panel.appendChild(opts);
+        body.appendChild(opts);
 
-        const positionPhysicsPanel = () => {
-            try {
-                const lc = document.getElementById('vrm-light-controls');
-                const agentPanel = document.getElementById('agent-panel');
-                let baseTop = 120;
-                let baseRight = 12;
-                if (lc) {
-                    const r = lc.getBoundingClientRect();
-                    baseTop = Math.round(r.top);
-                    // 与渲染面板并排行：物理面板放在其左侧
-                    baseRight = 12 + Math.max(0, Math.round(r.width) + 12);
-                }
-                if (agentPanel) {
-                    const a = agentPanel.getBoundingClientRect();
-                    baseTop = Math.max(baseTop, Math.round(a.bottom) + 12);
-                }
-                // 视口保护：避免与底部主控制面板重叠
-                const controlPanel = document.getElementById('vrm-control-panel');
-                if (controlPanel) {
-                    const c = controlPanel.getBoundingClientRect();
-                    const panelHeight = panel.offsetHeight || 260;
-                    if (baseTop + panelHeight > c.top - 10) {
-                        baseTop = Math.max(80, Math.round(c.top - panelHeight - 10));
-                    }
-                }
-                panel.style.top = baseTop + 'px';
-                panel.style.right = baseRight + 'px';
-            } catch (_) {}
+        
+
+        const toggleBtn = document.createElement('button');
+        toggleBtn.title = '折叠';
+        toggleBtn.textContent = '−';
+        toggleBtn.style.position = 'absolute';
+        toggleBtn.style.top = '6px';
+        toggleBtn.style.right = '6px';
+        toggleBtn.style.width = '24px';
+        toggleBtn.style.height = '24px';
+        toggleBtn.style.padding = '0';
+        toggleBtn.style.fontWeight = 'bold';
+        toggleBtn.style.textAlign = 'center';
+        toggleBtn.style.background = '#e0e1e2';
+        toggleBtn.style.color = '#333';
+        toggleBtn.style.borderRadius = '4px';
+        toggleBtn.style.border = 'none';
+        toggleBtn.style.cursor = 'pointer';
+        toggleBtn.style.opacity = '0.8';
+
+        const applyMin = (min) => {
+            if (min) {
+                try {
+                    const curW = panel.style.width && panel.style.width.endsWith('px')
+                        ? panel.style.width
+                        : (panel.offsetWidth ? (panel.offsetWidth + 'px') : '300px');
+                    panel.dataset.prevWidth = curW;
+                } catch (_) {}
+                panel.classList.add('minimized');
+                panel.style.width = '140px';
+                panel.style.height = '40px';
+                panel.style.padding = '6px 10px';
+                panel.style.overflow = 'hidden';
+                try { document.getElementById('physics-body').style.display = 'none'; } catch (_) {}
+                try { document.getElementById('physics-resize').style.display = 'none'; } catch (_) {}
+                try { document.getElementById('physics-title').style.marginBottom = '0'; } catch (_) {}
+                toggleBtn.textContent = '+';
+                toggleBtn.style.width = '28px';
+                toggleBtn.style.height = '28px';
+                toggleBtn.style.fontSize = '18px';
+                toggleBtn.style.top = '6px';
+                toggleBtn.style.left = 'auto';
+                toggleBtn.style.right = '6px';
+                toggleBtn.style.transform = 'none';
+            } else {
+                panel.classList.remove('minimized');
+                try {
+                    const prevW = panel.dataset.prevWidth || '300px';
+                    panel.style.width = prevW;
+                } catch (_) {}
+                panel.style.height = 'auto';
+                panel.style.padding = '10px';
+                panel.style.overflow = '';
+                try { document.getElementById('physics-body').style.display = 'block'; } catch (_) {}
+                try { document.getElementById('physics-resize').style.display = ''; } catch (_) {}
+                try { document.getElementById('physics-title').style.marginBottom = '8px'; } catch (_) {}
+                toggleBtn.textContent = '−';
+                toggleBtn.style.width = '24px';
+                toggleBtn.style.height = '24px';
+                toggleBtn.style.fontSize = '';
+                toggleBtn.style.top = '6px';
+                toggleBtn.style.left = 'auto';
+                toggleBtn.style.right = '6px';
+                toggleBtn.style.transform = 'none';
+            }
         };
-        positionPhysicsPanel();
-        try { window.addEventListener('resize', positionPhysicsPanel); } catch (_) {}
+        try { const m = localStorage.getItem('physics_panel_min'); applyMin(m === '1'); } catch (_) {}
+        panel.addEventListener('click', (e) => {
+            if (panel.classList.contains('minimized') && e.target === panel) {
+                try { toggleBtn.click(); } catch(_) {}
+            }
+        });
+        toggleBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const min = !panel.classList.contains('minimized');
+            applyMin(min);
+            try { localStorage.setItem('physics_panel_min', min ? '1' : '0'); } catch (_) {}
+        });
+        panel.appendChild(toggleBtn);
+        panel.appendChild(resizer);
 
         const btnRow = document.createElement('div');
         btnRow.style.display = 'flex';
         btnRow.style.gap = '8px';
         btnRow.style.marginTop = '8px';
+        btnRow.style.flexWrap = 'wrap';
+        btnRow.style.justifyContent = 'flex-start';
         const btnSoft = document.createElement('button');
         btnSoft.textContent = '柔软';
         const btnStd = document.createElement('button');
@@ -868,7 +940,7 @@ function applyI18NToControlPanels() {
         btnRow.appendChild(btnNoG);
         btnRow.appendChild(btnReset);
         [btnSoft, btnStd, btnStiff, btnApply, btnDebug, btnNoG, btnReset].forEach(b => { b.className = 'control-button'; });
-        panel.appendChild(btnRow);
+        body.appendChild(btnRow);
 
         const apply = () => {
             if (!window.vrmManager) return;
@@ -900,6 +972,7 @@ function applyI18NToControlPanels() {
         btnReset.onclick = () => { try { window.vrmManager && window.vrmManager.resetSpringBones(); } catch (_) {} };
 
         document.body.appendChild(panel);
+        try { window.makeDraggableResizablePanel('physics-panel', 'physics-title', 'physics-resize', 'physics_panel'); } catch (_) {}
     }
     
     // 创建VRM控制面板
@@ -3310,4 +3383,3 @@ const ready = () => {
 
 document.addEventListener("DOMContentLoaded", ready);
 window.addEventListener("load", ready);
-

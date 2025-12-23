@@ -27,11 +27,11 @@
       "three/build/three.module.js": "/static/libs/three.module.js",
       "three/addons/": "/static/libs/jsm/",
       "three/examples/jsm/": "/static/libs/jsm/",
-      "@pixiv/three-vrm": "https://unpkg.com/@pixiv/three-vrm@latest?module",
-      "@pixiv/three-vrm-animation": "https://unpkg.com/@pixiv/three-vrm-animation@latest?module"
+      "@pixiv/three-vrm": "/static/libs/three-vrm.module.min.js",
+      "@pixiv/three-vrm-animation": "/static/libs/three-vrm-animation.module.min.js"
     }
   }
-</script>
+  </script>
 <script>
   // 初始化占位：实际路径稍后由后端模板注入。
   // 若后端未提供，则使用本地默认 '/static/EE.vrm'。
@@ -54,7 +54,7 @@
   window.GLTFLoader = GLTFLoader;
   window.THREE.GLTFLoader = GLTFLoader;
 
-  // 2) VRM 插件（优先 CDN 的 ESM，失败则回退到本地 ESM；不再使用 UMD）
+  // 2) VRM 插件（本地优先，失败再回退到 CDN）
   try {
     const { VRMLoaderPlugin, VRMUtils, VRM } = await import('@pixiv/three-vrm');
     window.VRMLoaderPluginModule = VRMLoaderPlugin;
@@ -62,37 +62,37 @@
     window.VRMLoaderPlugin = VRMLoaderPlugin;
     window.THREE.VRMLoaderPlugin = VRMLoaderPlugin;
     window.VRMClass = VRM;
-    console.log('CDN ESM VRM 插件已就绪（v3），SpringBone 支持预计可用');
+    console.log('ESM VRM 插件已就绪');
     window.__VRM_STACK_READY__ = true;
   } catch (cdnErr) {
     try {
-      const { VRMLoaderPlugin, VRMUtils, VRM } = await import('/static/libs/three-vrm.module.min.js');
+      const { VRMLoaderPlugin, VRMUtils, VRM } = await import('https://unpkg.com/@pixiv/three-vrm@latest?module');
       window.VRMLoaderPluginModule = VRMLoaderPlugin;
       window.VRMUtils = VRMUtils;
       window.VRMLoaderPlugin = VRMLoaderPlugin;
       window.THREE.VRMLoaderPlugin = VRMLoaderPlugin;
       window.VRMClass = VRM;
-      console.log('本地 ESM VRM 插件已就绪（回退）');
+      console.log('CDN ESM VRM 插件已就绪（回退）');
       window.__VRM_STACK_READY__ = true;
     } catch (e) {
       console.warn('VRM 插件加载失败（ESM）：', e);
     }
   }
 
-  // 3) VRMA 插件（优先 CDN 的 ESM，失败则回退到本地 ESM）
+  // 3) VRMA 插件（本地优先，失败再回退到 CDN）
   try {
     const { VRMAnimationLoaderPlugin, createVRMAnimationClip } = await import('@pixiv/three-vrm-animation');
     window.VRMAnimationLoaderPluginModule = VRMAnimationLoaderPlugin;
     window.createVRMAnimationClip = createVRMAnimationClip;
     window.VRMAnimationLoaderPlugin = VRMAnimationLoaderPlugin;
-    console.log('CDN ESM VRMA 插件已就绪');
+    console.log('ESM VRMA 插件已就绪');
   } catch (cdnErr) {
     try {
-      const { VRMAnimationLoaderPlugin, createVRMAnimationClip } = await import('/static/libs/three-vrm-animation.module.min.js');
+      const { VRMAnimationLoaderPlugin, createVRMAnimationClip } = await import('https://unpkg.com/@pixiv/three-vrm-animation@latest?module');
       window.VRMAnimationLoaderPluginModule = VRMAnimationLoaderPlugin;
       window.createVRMAnimationClip = createVRMAnimationClip;
       window.VRMAnimationLoaderPlugin = VRMAnimationLoaderPlugin;
-      console.log('本地 ESM VRMA 插件已就绪（回退）');
+      console.log('CDN ESM VRMA 插件已就绪（回退）');
     } catch (e) {
       console.warn('VRMA 插件加载失败（ESM）：', e);
     }
@@ -1897,6 +1897,106 @@
     const subControlsRow = document.getElementById('sub-controls-row');
     subControlsRow.classList.remove('show');
   }
+</script>
+<div id="cc_panel" style="position:fixed;right:20px;bottom:calc(var(--panel-safe-bottom, 240px));z-index:9999;background:rgba(20,21,24,0.55);color:#fff;border-radius:12px;box-shadow:0 8px 28px rgba(0,0,0,0.40);width:320px;border:1px solid rgba(255,255,255,0.12);backdrop-filter:blur(14px) saturate(160%);user-select:none;pointer-events:auto;font-size:14px;">
+  <div id="cc_header" style="cursor:move;padding:8px 12px;font-weight:600;border-bottom:1px solid rgba(255,255,255,0.12);position:relative">归档压缩与合并设置
+    <button id="cc_toggle" title="折叠" style="position:absolute;top:-10px;right:-10px;width:24px;height:24px;padding:0;font-weight:bold;text-align:center;background:#e0e1e2;color:#333;border-radius:4px;border:none;cursor:pointer;opacity:0.8">−</button>
+  </div>
+  <div style="padding:10px;display:grid;grid-template-columns:1fr 1fr;gap:8px">
+    <label style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="cc_enabled"> 启用</label>
+    <label>行阈值<input type="number" id="cc_lines" min="1" style="width:100%;padding:6px;border-radius:6px;border:1px solid rgba(255,255,255,0.18);background:rgba(255,255,255,0.08);color:#f5f5f7"></label>
+    <label>大小阈值(MB)<input type="number" id="cc_size" min="1" style="width:100%;padding:6px;border-radius:6px;border:1px solid rgba(255,255,255,0.18);background:rgba(255,255,255,0.08);color:#f5f5f7"></label>
+    <label>间隔(s)<input type="number" id="cc_interval" min="1" style="width:100%;padding:6px;border-radius:6px;border:1px solid rgba(255,255,255,0.18);background:rgba(255,255,255,0.08);color:#f5f5f7"></label>
+    <label>开始小时<input type="number" id="cc_start" min="0" max="23" style="width:100%;padding:6px;border-radius:6px;border:1px solid rgba(255,255,255,0.18);background:rgba(255,255,255,0.08);color:#f5f5f7"></label>
+    <label>结束小时<input type="number" id="cc_end" min="0" max="23" style="width:100%;padding:6px;border-radius:6px;border:1px solid rgba(255,255,255,0.18);background:rgba(255,255,255,0.08);color:#f5f5f7"></label>
+    <label style="grid-column:1 / span 2;display:flex;align-items:center;gap:6px"><input type="checkbox" id="cc_delete"> 合并后删除分片</label>
+  </div>
+  <div style="padding:10px;padding-top:0;display:flex;gap:8px">
+    <button id="cc_refresh" style="flex:1;background:#2563eb;color:#fff;border:none;padding:8px;border-radius:6px">刷新</button>
+    <button id="cc_save" style="flex:1;background:#10b981;color:#063;border:none;padding:8px;border-radius:6px">保存</button>
+  </div>
+  <div id="cc_msg" style="padding:0 10px 10px 10px;font-size:12px;color:#9ca3af"></div>
+  <div id="cc_resize" style="position:absolute;right:6px;bottom:6px;width:12px;height:12px;background:rgba(255,255,255,0.18);border-radius:3px;cursor:se-resize"></div>
+</div>
+<script>
+async function ccFetch() {
+  try {
+    const r = await fetch('/api/memory/compact_config', {cache: 'no-store'});
+    const d = await r.json();
+    document.getElementById('cc_enabled').checked = !!d.archive_compact_enabled;
+    document.getElementById('cc_lines').value = d.archive_compact_lines_threshold ?? '';
+    document.getElementById('cc_size').value = d.archive_compact_size_mb_threshold ?? '';
+    document.getElementById('cc_interval').value = d.archive_compact_interval_sec ?? '';
+    document.getElementById('cc_start').value = d.archive_compact_window_start_hour ?? '';
+    document.getElementById('cc_end').value = d.archive_compact_window_end_hour ?? '';
+    document.getElementById('cc_delete').checked = !!d.archive_compact_delete_shards;
+    document.getElementById('cc_msg').textContent = '已加载当前配置';
+  } catch(e) {
+    document.getElementById('cc_msg').textContent = '加载失败: ' + e;
+  }
+}
+async function ccSave() {
+  const payload = {
+    archive_compact_enabled: document.getElementById('cc_enabled').checked,
+    archive_compact_lines_threshold: parseInt(document.getElementById('cc_lines').value || '0'),
+    archive_compact_size_mb_threshold: parseInt(document.getElementById('cc_size').value || '0'),
+    archive_compact_interval_sec: parseInt(document.getElementById('cc_interval').value || '0'),
+    archive_compact_window_start_hour: parseInt(document.getElementById('cc_start').value || '0'),
+    archive_compact_window_end_hour: parseInt(document.getElementById('cc_end').value || '0'),
+    archive_compact_delete_shards: document.getElementById('cc_delete').checked,
+  };
+  try {
+    const r = await fetch('/api/memory/compact_config', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload)});
+    const d = await r.json();
+    document.getElementById('cc_msg').textContent = d.success ? '已保存' : ('保存失败: ' + (d.error||''));
+  } catch(e) {
+    document.getElementById('cc_msg').textContent = '保存失败: ' + e;
+  }
+}
+document.getElementById('cc_refresh').addEventListener('click', ccFetch);
+document.getElementById('cc_save').addEventListener('click', ccSave);
+ccFetch();
+try { window.makeDraggableResizablePanel('cc_panel', 'cc_header', 'cc_resize', 'cc_panel'); } catch(e) {}
+try {
+  const panel = document.getElementById('cc_panel');
+  const toggleBtn = document.getElementById('cc_toggle');
+  const applyMin = (min) => {
+    if (min) {
+      panel.classList.add('minimized');
+      panel.style.width = '48px';
+      panel.style.height = '48px';
+      panel.style.padding = '0';
+      panel.style.overflow = 'hidden';
+      toggleBtn.textContent = '+';
+      toggleBtn.style.top = '50%';
+      toggleBtn.style.left = '50%';
+      toggleBtn.style.right = 'auto';
+      toggleBtn.style.transform = 'translate(-50%, -50%)';
+    } else {
+      panel.classList.remove('minimized');
+      panel.style.height = 'auto';
+      panel.style.overflow = '';
+      toggleBtn.textContent = '−';
+      toggleBtn.style.top = '-10px';
+      toggleBtn.style.left = 'auto';
+      toggleBtn.style.right = '-10px';
+      toggleBtn.style.transform = 'none';
+    }
+  };
+  const m = localStorage.getItem('cc_panel_min');
+  applyMin(m === '1');
+  panel.addEventListener('click', (e) => {
+    if (panel.classList.contains('minimized') && e.target === panel) {
+      try { toggleBtn.click(); } catch(_) {}
+    }
+  });
+  toggleBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const min = !panel.classList.contains('minimized');
+    applyMin(min);
+    localStorage.setItem('cc_panel_min', min ? '1' : '0');
+  });
+} catch(_){ }
 </script>
 </body>
 </html>

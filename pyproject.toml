@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "xiao8"
+name = "project-ee"
 version = "0.1.0"
-description = "Xiao8 application"
+description = "Project EE application"
 readme = "README.MD"
 requires-python = ">=3.11,<3.13"
 dependencies = [
@@ -24,7 +24,6 @@ dependencies = [
   "python-multipart",
   "pillow",
   "pyautogui",
-  "gui-agents",
 ]
 
 

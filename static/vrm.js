@@ -126,139 +126,64 @@ class VRMManager {
         }
     }
 
-    // 【增强版】物理参数微调与碰撞体修正
     _tuneHairPhysics(springBoneManager) {
-        console.log('【PhysicsFix】正在启动物理微调程序...');
+        if (!springBoneManager) return;
+        const cfg = this._hairConfig || { gravityPowerMin: 3.5, stiffnessMax: 1.5, dragMin: 0.4, colliderScale: 0.5 };
 
-        if (!springBoneManager) {
-            console.warn('【PhysicsFix】SpringBone管理器不存在，跳过。');
-            return;
-        }
-
-        const rawJoints = springBoneManager.springBones ||
-                          springBoneManager.joints ||
-                          springBoneManager._joints ||
-                          springBoneManager._springBones;
-
+        const rawJoints = springBoneManager.springBones || springBoneManager.joints || springBoneManager._joints || springBoneManager._springBones;
         let joints = [];
-        if (rawJoints instanceof Set) {
-            joints = Array.from(rawJoints);
-        } else if (Array.isArray(rawJoints)) {
-            joints = rawJoints;
-        }
-
-        console.log(`【PhysicsFix】捕获到物理关节数量: ${joints.length}`);
-
-        if (joints.length === 0) {
-            console.warn('【PhysicsFix】未找到任何关节，无法微调。');
-            return;
-        }
-
-        // 2. 缩小碰撞体 (Collider) - 解决刘海被“空气头”顶飞的问题
-        // 获取所有碰撞体组
+        if (rawJoints instanceof Set) joints = Array.from(rawJoints); else if (Array.isArray(rawJoints)) joints = rawJoints;
         const colliderGroups = springBoneManager.colliderGroups || springBoneManager._colliderGroups || [];
-        let shrunkColliders = 0;
 
-        // 遍历所有碰撞体，如果是头部的，稍微缩小一点
         if (colliderGroups instanceof Set || Array.isArray(colliderGroups)) {
             const groups = Array.isArray(colliderGroups) ? colliderGroups : Array.from(colliderGroups);
             for (const group of groups) {
-                // 简单粗暴：把所有碰撞体半径缩小到原来的 80%
-                // 这样可以避免头发被异常撑开
                 const colliders = group.colliders || group._colliders || [];
                 for (const c of colliders) {
                     if (c.radius !== undefined) {
-                        c.radius *= Number(this._hairConfig.colliderScale || 0.7);
-                        shrunkColliders++;
+                        const scale = Number(cfg.colliderScale);
+                        if (isFinite(scale) && scale > 0 && scale !== 1) c.radius *= scale;
                     }
                 }
             }
         }
-        console.log(`【PhysicsFix】已缩小 ${shrunkColliders} 个碰撞体半径，防止头发被撑开。`);
-
-        // 3. 调整头发重力与刚度
-        let touched = 0;
 
         for (const j of joints) {
             const s = j.settings || j.setting || j.params || j._settings || j._params;
             if (!s) continue;
+            const gMin = Number(cfg.gravityPowerMin);
+            const dMin = Number(cfg.dragMin);
+            const kMax = Number(cfg.stiffnessMax);
+
             const gCandidates = ['gravityPower','gravityFactor','gravityScale'];
-            let appliedGravity = false;
             for (const key of gCandidates) {
-                if (s[key] !== undefined) { s[key] = Math.max(Number(this._hairConfig.gravityPowerMin || 3.5), parseFloat(s[key]) || 0); appliedGravity = true; }
-            }
-            if (!appliedGravity) {
-                try {
-                    const mgr = springBoneManager;
-                    const gdir = new THREE.Vector3(0, -1, 0);
-                    if (typeof mgr.setGravity === 'function') mgr.setGravity(gdir);
-                    else if (mgr.gravity && typeof mgr.gravity.copy === 'function') mgr.gravity.copy(gdir);
-                } catch (_) {}
+                if (s[key] !== undefined && isFinite(gMin)) {
+                    s[key] = Math.max(gMin, parseFloat(s[key]) || 0);
+                }
             }
             if (s.gravityDir) {
                 if (typeof s.gravityDir.set === 'function') { s.gravityDir.set(0, -1, 0); }
                 else { s.gravityDir = { x: 0, y: -1, z: 0 }; }
             }
+
             const stiffCandidates = ['stiffness','stiffnessForce','stiffnessFactor'];
             for (const key of stiffCandidates) {
-                if (s[key] !== undefined) {
-                    const val = parseFloat(s[key]);
-                    const safeStiffness = Number.isFinite(val) ? val : 0.5;
-                    const targetStiffness = Math.max(0.2, Math.min(2.0, safeStiffness));
-                    s[key] = targetStiffness;
+                if (s[key] !== undefined && isFinite(kMax)) {
+                    const cur = parseFloat(s[key]) || 0;
+                    s[key] = Math.min(kMax, cur);
                 }
             }
+
             const dragCandidates = ['dragForce','drag','dragCoefficient'];
             for (const key of dragCandidates) {
-                if (s[key] !== undefined) { s[key] = Math.max(Number(this._hairConfig.dragMin || 0.6), parseFloat(s[key]) || 0); }
-            }
-            touched++;
-        }
-
-        if (touched === 0) {
-            for (const j of joints) {
-                const s = j.settings || j.setting || j.params || j._settings || j._params;
-                if (!s) continue;
-                const gCandidates = ['gravityPower','gravityFactor','gravityScale'];
-                for (const key of gCandidates) {
-                    if (s[key] !== undefined) { s[key] = Math.max(Number(this._hairConfig.gravityPowerMin || 3.5), parseFloat(s[key]) || 0); }
-                }
-                if (s.gravityDir) {
-                    if (typeof s.gravityDir.set === 'function') { s.gravityDir.set(0, -1, 0); }
-                    else { s.gravityDir = { x: 0, y: -1, z: 0 }; }
-                }
-                const stiffCandidates = ['stiffness','stiffnessForce','stiffnessFactor'];
-                for (const key of stiffCandidates) {
-                    if (s[key] !== undefined) {
-                        const val = parseFloat(s[key]);
-                        const safeStiffness = Number.isFinite(val) ? val : 0.5;
-                        const targetStiffness = Math.max(0.2, Math.min(2.0, safeStiffness));
-                        s[key] = targetStiffness;
-                    }
-                }
-                const dragCandidates = ['dragForce','drag','dragCoefficient'];
-                for (const key of dragCandidates) {
-                    if (s[key] !== undefined) { s[key] = Math.max(Number(this._hairConfig.dragMin || 0.6), parseFloat(s[key]) || 0); }
+                if (s[key] !== undefined && isFinite(dMin)) {
+                    const cur = parseFloat(s[key]) || 0;
+                    s[key] = Math.max(dMin, cur);
                 }
             }
-            console.log('【PhysicsFix】未检测到头发关键词，已对所有关节应用保守微调。');
         }
-        console.log(`【PhysicsFix】微调完成！已强制修正 ${Math.max(touched, 0)} 个头发关节的物理参数。`);
 
-        // 额外保障：再次明确管理器重力方向为 -Y
-        try {
-            const gdir = new THREE.Vector3(0, -1, 0);
-            if (typeof springBoneManager.setGravity === 'function') {
-                springBoneManager.setGravity(gdir);
-            } else if (springBoneManager.gravity && typeof springBoneManager.gravity.copy === 'function') {
-                springBoneManager.gravity.copy(gdir);
-            }
-        } catch (_) {}
-
-        // 4. 强制重置物理状态 (防止加载时的爆炸姿态残留)
-        if (typeof springBoneManager.reset === 'function') {
-            springBoneManager.reset();
-        }
+        try { if (typeof springBoneManager.reset === 'function') springBoneManager.reset(); } catch (_) {}
     }
 
     setHairPhysicsConfig(cfg = {}) {

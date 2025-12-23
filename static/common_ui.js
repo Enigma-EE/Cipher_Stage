@@ -209,6 +209,87 @@ if (chatContentWrapper) {
 // #########################################################
 // Below is the auto-folding logic for sidebarbox
 // #########################################################
+// 通用：使任意浮窗支持拖拽与右下角缩放，并持久化位置/尺寸/折叠
+window.makeDraggableResizablePanel = function(panelId, headerId, resizerId, storeKey) {
+    try {
+        const panel = document.getElementById(panelId);
+        const header = document.getElementById(headerId) || panel;
+        const resizer = document.getElementById(resizerId);
+        if (!panel) return;
+
+        const clamp = (x, y) => {
+            const w = window.innerWidth, h = window.innerHeight;
+            const pw = panel.offsetWidth || 300;
+            const ph = panel.offsetHeight || 200;
+            const nx = Math.max(4, Math.min(w - pw - 4, x));
+            const ny = Math.max(4, Math.min(h - ph - 4, y));
+            return [nx, ny];
+        };
+
+        try {
+            const s = localStorage.getItem(storeKey + '_pos');
+            const z = localStorage.getItem(storeKey + '_size');
+            const m = localStorage.getItem(storeKey + '_min');
+            if (z) { const w = Math.max(240, Math.min(560, parseInt(z))); panel.style.width = w + 'px'; }
+            if (s) {
+                const o = JSON.parse(s);
+                if (typeof o.left === 'number') { panel.style.left = o.left + 'px'; panel.style.right = 'auto'; }
+                if (typeof o.top === 'number') { panel.style.top = o.top + 'px'; panel.style.bottom = 'auto'; }
+            }
+            if (m === '1') {
+                panel.classList.add('minimized');
+                panel.style.width = '48px';
+                panel.style.height = '48px';
+                panel.style.padding = '0';
+            }
+        } catch (_) {}
+
+        let dragging = false, resizing = false, sx = 0, sy = 0, px = 0, py = 0, pw = 0;
+        const onDragStart = (clientX, clientY) => {
+            // 归档面板在最小化时不触发拖拽，避免影响点击还原
+            if (panel.classList.contains('minimized') && storeKey === 'cc_panel') return;
+            dragging = true; sx = clientX; sy = clientY;
+            const rect = panel.getBoundingClientRect(); px = rect.left; py = rect.top;
+            panel.style.bottom = 'auto'; panel.style.right = 'auto';
+            document.body.style.userSelect = 'none';
+        };
+        const onDragMove = (clientX, clientY) => {
+            if (!dragging && !resizing) return;
+            if (dragging) {
+                const dx = clientX - sx, dy = clientY - sy; const [nx, ny] = clamp(px + dx, py + dy);
+                panel.style.left = nx + 'px'; panel.style.top = ny + 'px';
+            } else if (resizing) {
+                const dx = clientX - sx; const w = Math.max(240, Math.min(560, pw + dx)); panel.style.width = w + 'px';
+            }
+        };
+        const onDragEnd = () => {
+            if (!dragging && !resizing) return;
+            document.body.style.userSelect = '';
+            if (dragging) {
+                dragging = false;
+                try { const rect = panel.getBoundingClientRect(); localStorage.setItem(storeKey + '_pos', JSON.stringify({ left: Math.round(rect.left), top: Math.round(rect.top) })); } catch (_) {}
+            }
+            if (resizing) {
+                resizing = false;
+                try { localStorage.setItem(storeKey + '_size', String(panel.offsetWidth)); } catch (_) {}
+            }
+        };
+
+        (header || panel).addEventListener('mousedown', (e) => onDragStart(e.clientX, e.clientY));
+        panel.addEventListener('mousedown', (e) => {
+            if (e.target && (e.target.closest('input,button,select,textarea'))) return;
+            if (header && header.contains(e.target)) return;
+            // 归档面板在最小化状态下，点击面板本体用于还原，不触发拖拽
+            if (panel.classList.contains('minimized') && storeKey === 'cc_panel' && e.target === panel) return;
+            onDragStart(e.clientX, e.clientY);
+        });
+        window.addEventListener('mousemove', (e) => onDragMove(e.clientX, e.clientY));
+        window.addEventListener('mouseup', onDragEnd);
+        if (resizer) {
+            resizer.addEventListener('mousedown', (e) => { resizing = true; sx = e.clientX; pw = panel.offsetWidth; panel.style.bottom = 'auto'; panel.style.right = 'auto'; document.body.style.userSelect = 'none'; });
+        }
+    } catch (_) {}
+};
 // 获取组件最大宽度
 const sidebarbox = document.getElementById('sidebarbox');
 // const toggleSidebarBtn = document.getElementById('toggle-sidebar-btn');

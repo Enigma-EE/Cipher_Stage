@@ -3,6 +3,7 @@ core_config.txt
 
 # 忽略日志文件
 *.log
+optimization_test_log.txt
 
 # 忽略 memory/store 下所有内容（含子目录和文件）
 memory/store/
@@ -12,6 +13,11 @@ config/*.json
 
 # 忽略临时文件
 *.tmp
+tmp_unity_test.json
+unity_debug_test.html
+
+# 忽略测试音频
+audio_test/
 
 # 忽略 Python 缓存文件和字节码
 __pycache__/

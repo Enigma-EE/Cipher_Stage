@@ -67,7 +67,8 @@ except Exception:
 from config import MONITOR_SERVER_PORT, MEMORY_SERVER_PORT, COMMENTER_SERVER_PORT, TOOL_SERVER_PORT
 from datetime import datetime
 import json
-import requests
+import threading
+import httpx
 import re
 from utils.frontend_utils import contains_chinese, replace_blank, replace_corner_mark, remove_bracket, spell_out_number, \
     is_only_punctuation, split_paragraph
@@ -242,12 +243,15 @@ def sync_connector_process(message_queue, shutdown_event, lanlan_name, sync_serv
                                     chat_history.append(
                                             {'role': 'assistant', 'content': [{'type': 'text', 'text': text_output_cache}]})
                                 text_output_cache = ''
-                                response = requests.post(
+                                def _post_no_raise(url, payload, timeout=5.0):
+                                    try:
+                                        httpx.post(url, json=payload, timeout=timeout)
+                                    except Exception:
+                                        pass
+                                threading.Thread(target=_post_no_raise, args=(
                                     f"http://127.0.0.1:{MEMORY_SERVER_PORT}/renew/{lanlan_name}",
-                                    json={'input_history': json.dumps(chat_history, indent=2, ensure_ascii=False)},
-                                )
-                                if response.json()['status'] == 'error':
-                                    print("💥 Conversation processing error", response.json()['message'])
+                                    {'input_history': json.dumps(chat_history, indent=2, ensure_ascii=False)},
+                                ), daemon=True).start()
                                 chat_history.clear()
 
                             if message["data"] == 'turn end': # lanlan的消息结束了
@@ -273,22 +277,29 @@ def sync_connector_process(message_queue, shutdown_event, lanlan_name, sync_serv
                                                 continue
                                             recent.append({'role': item.get('role'), 'text': txt})
                                     if recent:
-                                        requests.post(
+                                        def _post_no_raise2(url, payload, timeout=1.0):
+                                            try:
+                                                httpx.post(url, json=payload, timeout=timeout)
+                                            except Exception:
+                                                pass
+                                        threading.Thread(target=_post_no_raise2, args=(
                                             f"http://localhost:{TOOL_SERVER_PORT}/analyze_and_plan",
-                                            json={'messages': recent, 'lanlan_name': lanlan_name},
-                                            timeout=0.2
-                                        )
+                                            {'messages': recent, 'lanlan_name': lanlan_name},
+                                        ), daemon=True).start()
                                 except Exception:
                                     pass
 
                             elif message["data"] == 'session end': # 当前session结束了
                                 print("💗开始处理聊天历史")
-                                response = requests.post(
+                                def _post_no_raise3(url, payload, timeout=10.0):
+                                    try:
+                                        httpx.post(url, json=payload, timeout=timeout)
+                                    except Exception:
+                                        pass
+                                threading.Thread(target=_post_no_raise3, args=(
                                     f"http://127.0.0.1:{MEMORY_SERVER_PORT}/process/{lanlan_name}",
-                                    json={'input_history': json.dumps(chat_history, indent=2, ensure_ascii=False)},
-                                )
-                                if response.json()['status'] == 'error':
-                                    print("💥 Conversation processing error", response.json()['message'])
+                                    {'input_history': json.dumps(chat_history, indent=2, ensure_ascii=False)},
+                                ), daemon=True).start()
                                 text_output_cache = ''  # lanlan的当前消息
                                 current_turn = 'user'
                                 chat_history.clear()

@@ -1,11 +1,16 @@
-# from langchain_chroma import Chroma
-# ↑ 这个库引入了Chroma和onnx依赖，显著增大了一键包体积，暂时注释掉
 from typing import List
 from langchain_core.documents import Document
 from datetime import datetime
 from memory.recent import CompressedRecentHistoryManager
+import os
 from config import get_character_data, SEMANTIC_MODEL, OPENROUTER_API_KEY, OPENROUTER_URL, RERANKER_MODEL
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_openai import ChatOpenAI
+try:
+    import chromadb
+    from chromadb.utils import embedding_functions
+except Exception:
+    chromadb = None
+    embedding_functions = None
 from config.prompts_sys import semantic_manager_prompt
 import json
 
@@ -26,7 +31,7 @@ class SemanticMemory:
         self.original_memory[lanlan_name].store_conversation(event_id, messages)
         self.compressed_memory[lanlan_name].store_compressed_summary(event_id, messages)
 
-    def hybrid_search(self, query, lanlan_name, with_rerank=True, k=10):
+    def hybrid_search(self, query, lanlan_name, with_rerank=False, k=10):
         # 从原始和压缩记忆中获取结果
         original_results = self.original_memory[lanlan_name].retrieve_by_query(query, k)
         compressed_results = self.compressed_memory[lanlan_name].retrieve_by_query(query, k)
@@ -40,7 +45,7 @@ class SemanticMemory:
     def query(self, query, lanlan_name):
         results_text = "\n".join([
             f"记忆片段{i} | \n{doc.page_content}\n"
-            for i, doc in enumerate(self.hybrid_search(query, lanlan_name))
+            for i, doc in enumerate(self.hybrid_search(query, lanlan_name, with_rerank=False))
         ])
         return f"""======{lanlan_name}尝试回忆=====\n{query}\n\n====={lanlan_name}的相关记忆=====\n{results_text}"""
 
@@ -75,13 +80,16 @@ class SemanticMemory:
 
 class SemanticMemoryOriginal:
     def __init__(self, persist_directory, lanlan_name, name_mapping):
-        self.embeddings = OpenAIEmbeddings(base_url=OPENROUTER_URL, model=SEMANTIC_MODEL, api_key=OPENROUTER_API_KEY)
-        # self.vectorstore = Chroma(
-        #     collection_name="Origin",
-        #     persist_directory=persist_directory[lanlan_name],
-        #     embedding_function=self.embeddings
-        # )
-        self.vectorstore = None
+        base_store_dir = os.path.join(os.path.dirname(__file__), 'store')
+        os.makedirs(base_store_dir, exist_ok=True)
+        persist_path = os.path.join(base_store_dir, os.path.basename(persist_directory.get(lanlan_name, f"semantic_memory_{lanlan_name}")))
+        os.makedirs(persist_path, exist_ok=True)
+        if chromadb and embedding_functions:
+            client = chromadb.PersistentClient(path=persist_path)
+            ef = embedding_functions.SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+            self.vectorstore = _ChromaVectorStore(client, f"semantic_{lanlan_name}_original", ef)
+        else:
+            self.vectorstore = _InMemoryStore()
         self.lanlan_name = lanlan_name
         self.name_mapping = name_mapping
 
@@ -128,13 +136,16 @@ class SemanticMemoryCompressed:
     def __init__(self, persist_directory, lanlan_name, recent_history_manager: CompressedRecentHistoryManager, name_mapping):
         self.lanlan_name = lanlan_name
         self.name_mapping = name_mapping
-        self.embeddings = OpenAIEmbeddings(base_url=OPENROUTER_URL, model=SEMANTIC_MODEL, api_key=OPENROUTER_API_KEY)
-        self.vectorstore = None
-        # self.vectorstore = Chroma(
-        #     collection_name="Compressed",
-        #     persist_directory=persist_directory[lanlan_name],
-        #     embedding_function=self.embeddings
-        # )
+        base_store_dir = os.path.join(os.path.dirname(__file__), 'store')
+        os.makedirs(base_store_dir, exist_ok=True)
+        persist_path = os.path.join(base_store_dir, os.path.basename(persist_directory.get(lanlan_name, f"semantic_memory_{lanlan_name}")))
+        os.makedirs(persist_path, exist_ok=True)
+        if chromadb and embedding_functions:
+            client = chromadb.PersistentClient(path=persist_path)
+            ef = embedding_functions.SentenceTransformerEmbeddingFunction(model_name="all-MiniLM-L6-v2")
+            self.vectorstore = _ChromaVectorStore(client, f"semantic_{lanlan_name}_compressed", ef)
+        else:
+            self.vectorstore = _InMemoryStore()
         self.recent_history_manager = recent_history_manager
 
     def store_compressed_summary(self, event_id, messages):
@@ -160,3 +171,43 @@ class SemanticMemoryCompressed:
     def retrieve_by_query(self, query, k=10):
         # 在压缩摘要上进行语义搜索
         return self.vectorstore.similarity_search(query, k=k)
+
+
+class _ChromaVectorStore:
+    def __init__(self, client, collection_name: str, embedding_function):
+        self.collection = client.get_or_create_collection(
+            name=collection_name,
+            embedding_function=embedding_function
+        )
+
+    def add_texts(self, texts: List[str], metadatas: List[dict]):
+        import uuid
+        ids = [str(uuid.uuid4()) for _ in texts]
+        self.collection.add(documents=texts, metadatas=metadatas, ids=ids)
+
+    def similarity_search(self, query: str, k: int = 10) -> List[Document]:
+        results = self.collection.query(query_texts=[query], n_results=k)
+        docs = []
+        if results and results.get('documents'):
+            documents = results['documents'][0]
+            metadatas = results.get('metadatas', [[]])[0]
+            for i, content in enumerate(documents):
+                meta = metadatas[i] if i < len(metadatas) else {}
+                docs.append(Document(page_content=content, metadata=meta))
+        return docs
+
+class _InMemoryStore:
+    def __init__(self):
+        self._docs = []
+
+    def add_texts(self, texts: List[str], metadatas: List[dict]):
+        for i, t in enumerate(texts):
+            meta = metadatas[i] if i < len(metadatas) else {}
+            self._docs.append(Document(page_content=t, metadata=meta))
+
+    def similarity_search(self, query: str, k: int = 10) -> List[Document]:
+        q = (query or "").lower()
+        filtered = [d for d in self._docs if q and q in (d.page_content or "").lower()]
+        if not filtered:
+            filtered = list(self._docs)
+        return filtered[-k:]

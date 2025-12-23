@@ -333,10 +333,39 @@
                     </div>
                 </label>
                 <select id="coreApiSelect" style="width: 100%; padding: 10px 12px; border-radius: 6px; border: 1px solid #ccc; font-size: 1rem;">
+                    <option value="ollama">Ollama（本地）</option>
                     <option value="qwen">Qwen-Omni（阿里）</option>
                     <option value="openai">4o-realtime（OpenAI）</option>
                     <option value="glm">GLM-realtime（智谱）</option>
                 </select>
+            </div>
+            <div id="ollama-config" class="field-row" style="display: none;">
+                <label for="ollamaModel">
+                    本地模型（Ollama Tag）
+                    <div class="tooltip-container">
+                        <span class="tooltip-icon">?</span>
+                        <div class="tooltip-content">
+                            例如：qwen3:14b、deepseek-r1:14b、mistral-small:14b。需要先通过 Ollama 下载模型。
+                        </div>
+                    </div>
+                </label>
+                <select id="ollamaModelSelect" style="width: 100%; padding: 10px 12px; border-radius: 6px; border: 1px solid #ccc; font-size: 1rem;">
+                    <option value="">正在加载本地模型...</option>
+                    <option value="custom">自定义输入...</option>
+                </select>
+                <input type="text" id="ollamaModel" placeholder="例如：qwen3:14b" value="" style="max-width: 600px; display: none;">
+            </div>
+            <div id="ollama-url-config" class="field-row" style="display: none;">
+                <label for="ollamaUrl">
+                    本地服务地址（Ollama）
+                    <div class="tooltip-container">
+                        <span class="tooltip-icon">?</span>
+                        <div class="tooltip-content">
+                            默认是 http://127.0.0.1:11434。仅当你修改了 Ollama 监听端口时需要调整。
+                        </div>
+                    </div>
+                </label>
+                <input type="text" id="ollamaUrl" placeholder="http://127.0.0.1:11434" value="" style="max-width: 600px;">
             </div>
             <div class="field-row">
                 <label for="assistApiSelect">
@@ -353,6 +382,7 @@
                     </div>
                 </label>
                 <select id="assistApiSelect" style="width: 100%; padding: 10px 12px; border-radius: 6px; border: 1px solid #ccc; font-size: 1rem;">
+                    <option value="ollama">本地（Ollama）</option>
                     <option value="qwen">阿里（推荐）</option>
                     <option value="openai">OpenAI</option>
                     <option value="glm">智谱</option>
@@ -446,6 +476,14 @@ async function loadCurrentApiKey() {
             if (data.coreApi && document.getElementById('coreApiSelect')) {
                 document.getElementById('coreApiSelect').value = data.coreApi;
             }
+            // 当选择 Ollama 时显示本地配置区域
+            toggleOllamaFields();
+            if (typeof data.ollamaModel === 'string' && document.getElementById('ollamaModel')) {
+                document.getElementById('ollamaModel').value = data.ollamaModel;
+            }
+            if (typeof data.ollamaUrl === 'string' && document.getElementById('ollamaUrl')) {
+                document.getElementById('ollamaUrl').value = data.ollamaUrl || 'http://127.0.0.1:11434';
+            }
             if (data.assistApi && document.getElementById('assistApiSelect')) {
                 document.getElementById('assistApiSelect').value = data.assistApi;
             }
@@ -483,29 +521,48 @@ document.getElementById('api-key-form').addEventListener('submit', async functio
     const assistApiKeyQwen = document.getElementById('assistApiKeyInputQwen') ? document.getElementById('assistApiKeyInputQwen').value.trim() : '';
     const assistApiKeyOpenai = document.getElementById('assistApiKeyInputOpenai') ? document.getElementById('assistApiKeyInputOpenai').value.trim() : '';
     const assistApiKeyGlm = document.getElementById('assistApiKeyInputGlm') ? document.getElementById('assistApiKeyInputGlm').value.trim() : '';
+    let ollamaModel = '';
+    const ollamaModelSelect = document.getElementById('ollamaModelSelect');
+    if (ollamaModelSelect && ollamaModelSelect.value && ollamaModelSelect.value !== 'custom') {
+        ollamaModel = ollamaModelSelect.value;
+    } else {
+        ollamaModel = document.getElementById('ollamaModel') ? document.getElementById('ollamaModel').value.trim() : '';
+    }
+    const ollamaUrl = document.getElementById('ollamaUrl') ? document.getElementById('ollamaUrl').value.trim() : '';
 
-    if (!apiKey) {
-        showStatus('请输入API Key', 'error');
-        return;
+    // 当选择本地 Ollama 时允许不填 API Key
+    if (coreApi !== 'ollama') {
+        if (!apiKey) {
+            showStatus('请输入API Key', 'error');
+            return;
+        }
+    }
+    if (coreApi === 'ollama') {
+        if (!ollamaModel || !ollamaModel.includes(':')) {
+            showStatus('请选择或输入有效的本地模型（例如：qwen3:14b）', 'error');
+            return;
+        }
     }
     
     // 检查是否已有API Key，如果有则显示警告
     const currentApiKeyDiv = document.getElementById('current-api-key');
     if (currentApiKeyDiv.style.display !== 'none') {
         // 已有API Key，显示警告弹窗
-        pendingApiKey = { apiKey, coreApi, assistApi, assistApiKeyQwen, assistApiKeyOpenai, assistApiKeyGlm };
+        pendingApiKey = { apiKey, coreApi, assistApi, assistApiKeyQwen, assistApiKeyOpenai, assistApiKeyGlm, ollamaModel, ollamaUrl };
         showWarningModal();
     } else {
         // 没有现有API Key，直接保存
-        await saveApiKey({ apiKey, coreApi, assistApi, assistApiKeyQwen, assistApiKeyOpenai, assistApiKeyGlm });
+        await saveApiKey({ apiKey, coreApi, assistApi, assistApiKeyQwen, assistApiKeyOpenai, assistApiKeyGlm, ollamaModel, ollamaUrl });
     }
 });
 
-async function saveApiKey({ apiKey, coreApi, assistApi, assistApiKeyQwen, assistApiKeyOpenai, assistApiKeyGlm }) {
+async function saveApiKey({ apiKey, coreApi, assistApi, assistApiKeyQwen, assistApiKeyOpenai, assistApiKeyGlm, ollamaModel, ollamaUrl }) {
     // 确保apiKey是有效的字符串
-    if (!apiKey || typeof apiKey !== 'string') {
-        showStatus('API Key无效', 'error');
-        return;
+    if (coreApi !== 'ollama') {
+        if (!apiKey || typeof apiKey !== 'string') {
+            showStatus('API Key无效', 'error');
+            return;
+        }
     }
     
     try {
@@ -520,7 +577,9 @@ async function saveApiKey({ apiKey, coreApi, assistApi, assistApiKeyQwen, assist
                 assistApi: assistApi || undefined,
                 assistApiKeyQwen: assistApiKeyQwen || undefined,
                 assistApiKeyOpenai: assistApiKeyOpenai || undefined,
-                assistApiKeyGlm: assistApiKeyGlm || undefined
+                assistApiKeyGlm: assistApiKeyGlm || undefined,
+                ollamaModel: ollamaModel || undefined,
+                ollamaUrl: ollamaUrl || undefined
             })
         });
         
@@ -602,6 +661,18 @@ function toggleAdvancedOptions() {
     }
 }
 
+function toggleOllamaFields() {
+    const coreApiSelect = document.getElementById('coreApiSelect');
+    const isOllama = coreApiSelect && coreApiSelect.value === 'ollama';
+    const ollamaCfg = document.getElementById('ollama-config');
+    const ollamaUrlCfg = document.getElementById('ollama-url-config');
+    if (ollamaCfg) ollamaCfg.style.display = isOllama ? 'block' : 'none';
+    if (ollamaUrlCfg) ollamaUrlCfg.style.display = isOllama ? 'block' : 'none';
+    if (isOllama) {
+        loadOllamaModels();
+    }
+}
+
 // 根据核心API选择更新辅助API的提示和建议
 function updateAssistApiRecommendation() {
     const coreApiSelect = document.getElementById('coreApiSelect');
@@ -622,6 +693,9 @@ function updateAssistApiRecommendation() {
         case 'openai':
             recommendation = 'OpenAI作为核心API时，建议辅助API选择阿里以支持自定义语音功能';
             break;
+        case 'ollama':
+            recommendation = '本地模式下，辅助API仍建议选择阿里以使用自定义语音';
+            break;
     }
     
     // 更新辅助API选择框的提示
@@ -635,6 +709,7 @@ function updateAssistApiRecommendation() {
             <strong>当前建议：</strong>${recommendation}
         `;
     }
+    toggleOllamaFields();
 }
 
 // Beacon功能 - 页面关闭时发送信号给服务器（仅在直接打开时发送，iframe中不发送）
@@ -693,7 +768,70 @@ window.addEventListener('load', function() {
         // 初始化时也更新一次建议
         updateAssistApiRecommendation();
     }
+    // 无论当前选择为何，预加载一次本地模型列表，供后续切换使用
+    loadOllamaModels();
 });
+
+async function loadOllamaModels() {
+    const sel = document.getElementById('ollamaModelSelect');
+    const input = document.getElementById('ollamaModel');
+    if (!sel) return;
+    try {
+        sel.innerHTML = '<option value=\"\">正在加载本地模型...</option>';
+        const resp = await fetch('/api/ollama/models');
+        if (!resp.ok) throw new Error('网络错误');
+        const data = await resp.json();
+        const builtin = ['qwen3:14b','deepseek-r1:14b','llama3.1:8b','mistral:7b'];
+        const list = Array.isArray(data.models) ? data.models : [];
+        const merged = Array.from(new Set([...builtin, ...list]));
+        const frag = document.createDocumentFragment();
+        const optCustom = document.createElement('option');
+        optCustom.value = 'custom';
+        optCustom.textContent = '自定义输入...';
+        frag.appendChild(optCustom);
+        merged.forEach(m => {
+            const o = document.createElement('option');
+            o.value = m;
+            o.textContent = m;
+            frag.appendChild(o);
+        });
+        sel.innerHTML = '';
+        sel.appendChild(frag);
+        const saved = document.getElementById('ollamaModel')?.value || '';
+        if (saved && merged.includes(saved)) {
+            sel.value = saved;
+            input.style.display = 'none';
+        } else {
+            sel.value = 'custom';
+            input.style.display = 'block';
+        }
+        sel.onchange = () => {
+            const v = sel.value;
+            if (v === 'custom') {
+                input.style.display = 'block';
+            } else {
+                input.style.display = 'none';
+                input.value = v;
+            }
+        };
+    } catch (e) {
+        const builtin = ['qwen3:14b','deepseek-r1:14b','llama3.1:8b','mistral:7b'];
+        const frag = document.createDocumentFragment();
+        const optCustom = document.createElement('option');
+        optCustom.value = 'custom';
+        optCustom.textContent = '自定义输入...';
+        frag.appendChild(optCustom);
+        builtin.forEach(m => {
+            const o = document.createElement('option');
+            o.value = m;
+            o.textContent = m;
+            frag.appendChild(o);
+        });
+        sel.innerHTML = '';
+        sel.appendChild(frag);
+        input.style.display = 'block';
+    }
+}
 
 // 关闭API Key设置页面
 function closeApiKeySettings() {

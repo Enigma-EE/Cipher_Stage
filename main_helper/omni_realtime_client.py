@@ -6,6 +6,7 @@ import json
 import base64
 import time
 import logging
+import httpx
 
 from typing import Optional, Callable, Dict, Any, Awaitable
 from enum import Enum
@@ -96,9 +97,17 @@ class OmniRealtimeClient:
         self._modalities = ["text", "audio"]
         self._audio_in_buffer = False
         self._skip_until_next_response = False
+        self._is_ollama = False
+        self._ollama_client = None
+        self._ollama_stream_task = None
 
     async def connect(self, instructions: str, native_audio=True) -> None:
-        """Establish WebSocket connection with the Realtime API."""
+        """Establish connection with the Realtime API."""
+        if self.base_url.startswith("http"):
+            self._is_ollama = True
+            self._modalities = ["text"]
+            self._ollama_client = httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=60.0))
+            return
         url = f"{self.base_url}?model={self.model}"
         headers = {
             "Authorization": f"Bearer {self.api_key}"
@@ -196,7 +205,42 @@ class OmniRealtimeClient:
             await self.send_event(append_event)
 
     async def create_response(self, instructions: str, skipped: bool = False) -> None:
-        """Request a response from the API. Needed when using manual mode."""
+        """Request a response from the API."""
+        if self._is_ollama:
+            if skipped:
+                self._skip_until_next_response = True
+                return
+            if self._ollama_stream_task and not self._ollama_stream_task.done():
+                await self.handle_interruption()
+            async def _run():
+                try:
+                    self._is_responding = True
+                    self._is_first_text_chunk = True
+                    url = f"{self.base_url}/api/generate"
+                    payload = {"model": self.model, "prompt": instructions, "stream": True}
+                    async with self._ollama_client.stream("POST", url, json=payload) as r:
+                        async for line in r.aiter_lines():
+                            if not line:
+                                continue
+                            try:
+                                evt = json.loads(line)
+                            except Exception:
+                                continue
+                            if "response" in evt:
+                                if self.on_text_delta:
+                                    await self.on_text_delta(evt["response"], self._is_first_text_chunk)
+                                    self._is_first_text_chunk = False
+                            if evt.get("done"):
+                                break
+                    self._is_responding = False
+                    self._skip_until_next_response = False
+                    if self.on_response_done:
+                        await self.on_response_done()
+                except Exception as e:
+                    logger.error(f"Ollama stream error: {e}")
+                    self._is_responding = False
+            self._ollama_stream_task = asyncio.create_task(_run())
+            return
         if skipped == True:
             self._skip_until_next_response = True
         event = {
@@ -218,6 +262,13 @@ class OmniRealtimeClient:
 
     async def handle_interruption(self):
         """Handle user interruption of the current response."""
+        if self._is_ollama:
+            if self._ollama_stream_task and not self._ollama_stream_task.done():
+                self._ollama_stream_task.cancel()
+            self._is_responding = False
+            self._current_response_id = None
+            self._current_item_id = None
+            return
         if not self._is_responding:
             return
 
@@ -232,6 +283,8 @@ class OmniRealtimeClient:
         self._current_item_id = None
 
     async def handle_messages(self) -> None:
+        if self._is_ollama:
+            return
         try:
             if not self.ws:
                 logger.error("WebSocket connection is not established")
@@ -331,9 +384,17 @@ class OmniRealtimeClient:
 
     async def close(self) -> None:
         """Close the WebSocket connection."""
+        if self._is_ollama:
+            try:
+                if self._ollama_client:
+                    await self._ollama_client.aclose()
+            finally:
+                self._ollama_client = None
+                self._ollama_stream_task = None
+                self._is_ollama = False
+                return
         if self.ws:
             try:
-                # 尝试关闭websocket连接
                 await self.ws.close()
             except websockets.exceptions.ConnectionClosedOK:
                 logger.warning("OmniRealtimeClient: WebSocket connection already closed (OK).")

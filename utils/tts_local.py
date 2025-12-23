@@ -70,6 +70,50 @@ def synthesize(
         mime = "audio/wav" if fmt == "wav" else "audio/mpeg"
         return data, mime
 
+    elif provider == "edge":
+        # 使用 edge-tts (async)，这里需要用到 asyncio.run 或者 loop
+        # 注意：edge-tts 是异步库，如果 synthesize 是同步调用，需要 wrap 一下
+        voice = voice or "en-US-AnaNeural" # 默认音色
+        
+        # 简单封装一个异步调用
+        async def _edge_gen():
+            import edge_tts
+            communicate = edge_tts.Communicate(text, voice)
+            # 累积所有音频数据（Edge-TTS 返回的是 mp3 格式流）
+            data = b""
+            async for chunk in communicate.stream():
+                if chunk["type"] == "audio":
+                    data += chunk["data"]
+            return data
+
+        try:
+            import edge_tts
+            import asyncio
+        except ImportError:
+            raise TTSLocalError("edge-tts 未安装，请执行 pip install edge-tts")
+
+        try:
+            # 如果当前已经在 async loop 中，不能直接 run，需要 nest_asyncio 或者其他处理
+            # 简单起见，这里假设 synthesize 是在一个线程池或同步环境中被调用
+            # 如果报错 "This event loop is already running"，则需要调整架构
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            
+            if loop.is_running():
+                # 这种情况下比较麻烦，通常 synthesize 不应该在 async def 中直接被同步调用
+                # 这里做一个折衷：抛出异常提示
+                 raise TTSLocalError("无法在运行中的事件循环里同步调用 edge-tts，请检查调用方式")
+            else:
+                data = loop.run_until_complete(_edge_gen())
+                
+            mime = "audio/mpeg"
+            return data, mime
+        except Exception as e:
+            raise TTSLocalError(f"edge-tts 合成失败: {e}")
+
     elif provider in ("http", "cosyvoice", "chattts"):
         # 通过本地或远程HTTP服务合成，统一POST接口
         if not service_url:

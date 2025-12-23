@@ -247,6 +247,9 @@ MIT license. You may use, modify, and distribute the code and binaries, preservi
 - 嘴型驱动：后端产生的 `viseme_timeline` 通过 WebSocket 发送到前端，由 VRM 嘴型随时间轴变化
 - 调试页面：优先使用 `templates/viewer.html`/`templates/index.html` 进行加载与播放验证（本地启动后访问 `http://127.0.0.1:48922/index`）
 - Live2D 回退：若 VRM 资源不可用或性能受限，系统可回退到Live2D链路，仍可接受 `viseme_timeline`
+- 验证 Ollama 服务
+- 打开 http://127.0.0.1:11434/api/tags 可列出已安装模型
+- 若端口不同，在设置页“本地服务地址（Ollama）”处写你的实际地址
 
 ## 配置与密钥管理
 

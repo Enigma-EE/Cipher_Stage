@@ -98,11 +98,14 @@ try:
         elif core_cfg['coreApi'] == 'openai':
             CORE_URL = "wss://api.openai.com/v1/realtime"
             CORE_MODEL = "gpt-4o-realtime-preview"
+        elif core_cfg['coreApi'] == 'ollama':
+            CORE_URL = core_cfg.get('ollamaUrl', 'http://127.0.0.1:11434')
+            CORE_MODEL = core_cfg.get('ollamaModel', '')
         else:
             logger.error("💥 Unknown coreApi: " + core_cfg['coreApi'])
     else:
-        CORE_URL = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
-        CORE_MODEL = "qwen-omni-turbo-realtime-2025-05-08"
+        CORE_URL = "http://127.0.0.1:11434"
+        CORE_MODEL = "qwen3:14b"
     ASSIST_API_KEY_QWEN = core_cfg['assistApiKeyQwen'] if 'assistApiKeyQwen' in core_cfg and core_cfg['assistApiKeyQwen'] != '' else CORE_API_KEY
     ASSIST_API_KEY_OPENAI = core_cfg['assistApiKeyOpenai'] if 'assistApiKeyOpenai' in core_cfg and core_cfg['assistApiKeyOpenai'] != '' else CORE_API_KEY
     ASSIST_API_KEY_GLM = core_cfg['assistApiKeyGlm'] if 'assistApiKeyGlm' in core_cfg and core_cfg['assistApiKeyGlm'] != '' else CORE_API_KEY
@@ -132,14 +135,20 @@ try:
             CORRECTION_MODEL = "glm-z1-air"  # glm-z1-flash <-永久免费模型
             EMOTION_MODEL = "glm-4.5-flash"
             AUDIO_API_KEY = OPENROUTER_API_KEY = ASSIST_API_KEY_GLM
+        elif core_cfg['assistApi'] == 'ollama':
+            OPENROUTER_URL = core_cfg.get('ollamaUrl', 'http://127.0.0.1:11434')
+            SUMMARY_MODEL = core_cfg.get('ollamaModel', '')
+            CORRECTION_MODEL = core_cfg.get('ollamaModel', '')
+            EMOTION_MODEL = core_cfg.get('ollamaModel', '')
+            AUDIO_API_KEY = OPENROUTER_API_KEY = CORE_API_KEY
         else:
             logger.error("💥 Unknown assistApi: " + core_cfg['assistApi']) 
     else:
-        OPENROUTER_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-        SUMMARY_MODEL = "qwen-plus-2025-07-14"
-        CORRECTION_MODEL = "qwen3-235b-a22b-instruct-2507"
-        EMOTION_MODEL = "qwen-turbo-2025-07-15"
-        AUDIO_API_KEY = OPENROUTER_API_KEY = ASSIST_API_KEY_QWEN
+        OPENROUTER_URL = core_cfg.get('ollamaUrl', 'http://127.0.0.1:11434')
+        SUMMARY_MODEL = core_cfg.get('ollamaModel', 'qwen3:14b')
+        CORRECTION_MODEL = core_cfg.get('ollamaModel', 'qwen3:14b')
+        EMOTION_MODEL = core_cfg.get('ollamaModel', 'qwen3:14b')
+        AUDIO_API_KEY = OPENROUTER_API_KEY = CORE_API_KEY
 
     # 音频合成相关配置（本地/云端）
     AUDIO_ENGINE = core_cfg.get('audioEngine', 'cloud')  # 'cloud' | 'local'

@@ -426,14 +426,17 @@ async def get_core_config():
         except FileNotFoundError:
             # 如果文件不存在，返回当前内存中的CORE_API_KEY
             api_key = CORE_API_KEY
+            core_cfg = {}
         
         return {
             "api_key": api_key,
-            "coreApi": core_cfg.get('coreApi', 'qwen'),
-            "assistApi": core_cfg.get('assistApi', 'qwen'),
+            "coreApi": core_cfg.get('coreApi', 'ollama'),
+            "assistApi": core_cfg.get('assistApi', 'ollama'),
             "assistApiKeyQwen": core_cfg.get('assistApiKeyQwen', ''),
             "assistApiKeyOpenai": core_cfg.get('assistApiKeyOpenai', ''),
             "assistApiKeyGlm": core_cfg.get('assistApiKeyGlm', ''),
+            "ollamaModel": core_cfg.get('ollamaModel', 'qwen3:14b'),
+            "ollamaUrl": core_cfg.get('ollamaUrl', 'http://127.0.0.1:11434'),
             "success": True
         }
     except Exception as e:
@@ -451,19 +454,20 @@ async def update_core_config(request: Request):
         if not data:
             return {"success": False, "error": "无效的数据"}
         
-        if 'coreApiKey' not in data:
-            return {"success": False, "error": "缺少coreApiKey字段"}
-        
-        api_key = data['coreApiKey']
-        if api_key is None:
-            return {"success": False, "error": "API Key不能为null"}
-        
-        if not isinstance(api_key, str):
-            return {"success": False, "error": "API Key必须是字符串类型"}
-        
-        api_key = api_key.strip()
-        if not api_key:
-            return {"success": False, "error": "API Key不能为空"}
+        core_api = data.get('coreApi', '')
+        api_key = data.get('coreApiKey', '')
+        # 在选择本地 Ollama 时允许 API Key 为空
+        if core_api != 'ollama':
+            if api_key is None:
+                return {"success": False, "error": "API Key不能为null"}
+            if not isinstance(api_key, str):
+                return {"success": False, "error": "API Key必须是字符串类型"}
+            api_key = api_key.strip()
+            if not api_key:
+                return {"success": False, "error": "API Key不能为空"}
+        else:
+            # 本地模式下，API Key 字段置为空字符串
+            api_key = ""
         
         # 保存到core_config.json
         core_cfg = {"coreApiKey": api_key}
@@ -477,12 +481,45 @@ async def update_core_config(request: Request):
             core_cfg['assistApiKeyOpenai'] = data['assistApiKeyOpenai']
         if 'assistApiKeyGlm' in data:
             core_cfg['assistApiKeyGlm'] = data['assistApiKeyGlm']
+        if 'ollamaModel' in data:
+            core_cfg['ollamaModel'] = data['ollamaModel']
+        if 'ollamaUrl' in data:
+            core_cfg['ollamaUrl'] = data['ollamaUrl']
         with open('./config/core_config.json', 'w', encoding='utf-8') as f:
             json.dump(core_cfg, f, indent=2, ensure_ascii=False)
         
         return {"success": True, "message": "API Key已保存"}
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+@app.get('/api/ollama/models')
+async def api_ollama_models():
+    try:
+        try:
+            with open('./config/core_config.json', 'r', encoding='utf-8') as f:
+                core_cfg = json.load(f)
+        except FileNotFoundError:
+            core_cfg = {}
+        base = core_cfg.get('ollamaUrl', 'http://127.0.0.1:11434')
+        async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
+            r = await client.get(f"{base}/api/tags")
+            data = r.json()
+        out = []
+        models = data.get('models') or []
+        for m in models:
+            if isinstance(m, dict):
+                if 'model' in m and isinstance(m.get('model'), str):
+                    out.append(m['model'])
+                else:
+                    name = m.get('name') or m.get('id') or ''
+                    tags = m.get('tags') or []
+                    if name and isinstance(tags, list) and tags:
+                        for t in tags:
+                            out.append(f"{name}:{t}")
+        out = sorted(list(set([s for s in out if isinstance(s, str) and ':' in s])))
+        return {"success": True, "models": out}
+    except Exception as e:
+        return {"success": False, "error": str(e), "models": []}
 
 
 @app.on_event("startup")

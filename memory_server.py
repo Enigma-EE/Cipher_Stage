@@ -489,10 +489,13 @@ async def on_startup():
                                             os.remove(ap)
                                         except Exception:
                                             pass
+                    except Exception:
+                        pass
                 await asyncio.sleep(COMPACT_INTERVAL_SEC)
             except asyncio.CancelledError:
                 break
-            except Exception:
+            except Exception as e:
+                logger.error(f"Archive compact error: {e}")
                 await asyncio.sleep(COMPACT_INTERVAL_SEC)
     compact_task = asyncio.create_task(_auto_compact())
 

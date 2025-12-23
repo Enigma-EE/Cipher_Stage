@@ -3,6 +3,8 @@ import asyncio
 from langchain_openai import ChatOpenAI
 from config import OPENROUTER_API_KEY, OPENROUTER_URL, SUMMARY_MODEL
 from .mcp_client import McpRouterClient, McpToolCatalog
+import httpx
+from types import SimpleNamespace
 
 
 class Processor:
@@ -11,7 +13,11 @@ class Processor:
     Minimal implementation uses LLM to choose server capability and return a structured action plan.
     """
     def __init__(self):
-        self.llm = ChatOpenAI(model=SUMMARY_MODEL, base_url=OPENROUTER_URL, api_key=OPENROUTER_API_KEY, temperature=0)
+        self._is_ollama = OPENROUTER_URL.startswith("http://") and "11434" in OPENROUTER_URL
+        if not self._is_ollama:
+            self.llm = ChatOpenAI(model=SUMMARY_MODEL, base_url=OPENROUTER_URL, api_key=OPENROUTER_API_KEY, temperature=0)
+        else:
+            self.llm = None
         self.router = McpRouterClient()
         self.catalog = McpToolCatalog(self.router)
 
@@ -24,11 +30,25 @@ class Processor:
             " If no server fits or status is not online, return can_execute=false with reason."
         )
         user = f"Capabilities:\n{tools_brief}\n\nTask: {query}"
-        resp = self.llm.invoke([
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ])
-        text = resp.content.strip()
+        if not self._is_ollama:
+            resp = self.llm.invoke([
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ])
+            text = resp.content.strip()
+        else:
+            merged = "System:\n" + system + "\nUser:\n" + user
+            try:
+                with httpx.Client(timeout=httpx.Timeout(20.0)) as client:
+                    r = client.post(f"{OPENROUTER_URL}/api/generate", json={
+                        "model": SUMMARY_MODEL,
+                        "prompt": merged,
+                        "stream": False
+                    })
+                    data = r.json()
+                    text = (data.get("response") or "").strip()
+            except Exception as e:
+                text = "{\"can_execute\": false, \"reason\": \"ollama_error\"}"
         import json
         try:
             if text.startswith("```"):
